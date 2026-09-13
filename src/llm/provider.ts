@@ -1,6 +1,67 @@
 import { ChatParams, ChatResult, LlmProvider } from './types.js';
 
-/** OpenAI 兼容 chat/completions 客户端：DeepSeek/GLM/Kimi/Qwen/OpenAI 通吃 */
+/** 组合外部中断信号与超时信号（Node 18 无 AbortSignal.any 时退化为二选一） */
+function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const any = (AbortSignal as unknown as { any?: (sigs: AbortSignal[]) => AbortSignal }).any;
+  if (any) {
+    return signal ? any([signal, timeout]) : timeout;
+  }
+  return signal ?? timeout;
+}
+
+function httpError(status: number, body: string, retryAfterHeader: string | null): Error & { status: number; retryAfterMs?: number } {
+  const e = new Error(`LLM 请求失败 HTTP ${status}: ${body.slice(0, 500)}`) as Error & { status: number; retryAfterMs?: number };
+  e.status = status;
+  const ra = retryAfterHeader ? Number(retryAfterHeader) * 1000 : NaN;
+  if (Number.isFinite(ra) && ra > 0) e.retryAfterMs = ra;
+  return e;
+}
+
+/**
+ * SSE 增量聚合器（纯逻辑，可单测）：
+ * 把 OpenAI 兼容流式 chunk 的 content 增量与 tool_call 分片（按 index 归位）拼成完整消息。
+ */
+export class StreamAccumulator {
+  content = '';
+  usage: { prompt_tokens?: number; completion_tokens?: number } | undefined;
+  private calls = new Map<number, { id: string; name: string; arguments: string }>();
+
+  push(chunk: {
+    choices?: {
+      delta?: {
+        content?: string | null;
+        tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[];
+      };
+    }[];
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  }): void {
+    if (chunk.usage) this.usage = chunk.usage;
+    const delta = chunk.choices?.[0]?.delta;
+    if (!delta) return;
+    if (delta.content) this.content += delta.content;
+    for (const tc of delta.tool_calls ?? []) {
+      const cur = this.calls.get(tc.index) ?? { id: '', name: '', arguments: '' };
+      if (tc.id) cur.id = tc.id;
+      if (tc.function?.name) cur.name = tc.function.name;
+      if (tc.function?.arguments) cur.arguments += tc.function.arguments;
+      this.calls.set(tc.index, cur);
+    }
+  }
+
+  result(): { content: string | null; tool_calls: { id: string; type: 'function'; function: { name: string; arguments: string } }[] } {
+    const tool_calls = [...this.calls.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([index, c]) => ({
+        id: c.id || `stream_call_${index}`,
+        type: 'function' as const,
+        function: { name: c.name, arguments: c.arguments || '{}' },
+      }));
+    return { content: this.content || null, tool_calls };
+  }
+}
+
+/** OpenAI 兼容 chat/completions 客户端：DeepSeek/GLM/Kimi/Qwen/OpenAI 通吃，支持流式与超时 */
 export class OpenAICompatProvider implements LlmProvider {
   constructor(
     readonly baseURL: string,
@@ -8,29 +69,42 @@ export class OpenAICompatProvider implements LlmProvider {
   ) {}
 
   async chat(params: ChatParams): Promise<ChatResult> {
+    if (params.stream) return this.chatStream(params);
+    return this.chatOnce(params);
+  }
+
+  private async post(params: ChatParams, body: Record<string, unknown>): Promise<Response> {
     const url = `${this.baseURL.replace(/\/+$/, '')}/chat/completions`;
     let res: Response;
     try {
       res = await fetch(url, {
         method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: params.model,
-          messages: params.messages,
-          ...(params.tools?.length ? { tools: params.tools, tool_choice: 'auto' } : {}),
-          ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
-        }),
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` },
+        body: JSON.stringify(body),
+        signal: requestSignal(params.signal, params.timeoutMs ?? 600_000),
       });
     } catch (e) {
       throw new Error(`无法连接 ${url}: ${(e as Error).message}`);
     }
     if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`LLM 请求失败 HTTP ${res.status}: ${body.slice(0, 500)}`);
+      const text = await res.text().catch(() => '');
+      throw httpError(res.status, text, res.headers.get('retry-after'));
     }
+    return res;
+  }
+
+  private static buildBody(params: ChatParams, stream: boolean): Record<string, unknown> {
+    return {
+      model: params.model,
+      messages: params.messages,
+      ...(params.tools?.length ? { tools: params.tools, tool_choice: 'auto' } : {}),
+      ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
+      ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
+    };
+  }
+
+  private async chatOnce(params: ChatParams): Promise<ChatResult> {
+    const res = await this.post(params, OpenAICompatProvider.buildBody(params, false));
     const json = (await res.json()) as {
       choices?: { message?: { content: string | null; tool_calls?: unknown[] } }[];
       usage?: { prompt_tokens?: number; completion_tokens?: number };
@@ -48,6 +122,62 @@ export class OpenAICompatProvider implements LlmProvider {
         inputTokens: json.usage?.prompt_tokens ?? 0,
         outputTokens: json.usage?.completion_tokens ?? 0,
       },
+    };
+  }
+
+  private async chatStream(params: ChatParams): Promise<ChatResult> {
+    const res = await this.post(params, OpenAICompatProvider.buildBody(params, true));
+    if (!res.body) throw new Error('流式响应缺少 body');
+    const acc = new StreamAccumulator();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let emitted = false;
+    try {
+      for await (const raw of res.body) {
+        buf += decoder.decode(raw as Uint8Array, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (payload === '[DONE]') continue;
+          try {
+            const chunk = JSON.parse(payload);
+            const before = acc.content;
+            acc.push(chunk);
+            if (acc.content !== before) {
+              emitted = true;
+              params.onDelta?.(acc.content.slice(before.length));
+            }
+          } catch {
+            /* 非 JSON 心流行，忽略 */
+          }
+        }
+      }
+    } catch (e) {
+      // 已经流出一部分文本后再失败：重试会导致输出重复，标记为不可重试
+      if (emitted) (e as { noRetry?: boolean }).noRetry = true;
+      throw e;
+    }
+
+    const message = acc.result();
+    if (acc.usage?.prompt_tokens != null || acc.usage?.completion_tokens != null) {
+      return {
+        message,
+        usage: { inputTokens: acc.usage.prompt_tokens ?? 0, outputTokens: acc.usage.completion_tokens ?? 0 },
+      };
+    }
+    // 兼容不支持 include_usage 的服务：估算并标记
+    const inputChars = params.messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+    const outputChars = (message.content?.length ?? 0) + message.tool_calls.reduce((n, tc) => n + tc.function.arguments.length, 0);
+    return {
+      message,
+      usage: {
+        inputTokens: Math.ceil(inputChars / 3),
+        outputTokens: Math.ceil(outputChars / 3),
+      },
+      usageEstimated: true,
     };
   }
 }

@@ -1,14 +1,22 @@
 {
   "name": "keel-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Keel 龙骨 —— 可回放、可验证、可审计的编码智能体 CLI（event-sourced, evidence-driven coding agent）",
   "type": "module",
   "bin": {
     "keel": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "engines": {
     "node": ">=18.17"
   },
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",

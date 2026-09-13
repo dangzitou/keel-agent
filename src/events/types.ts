@@ -10,6 +10,7 @@ export type EventName =
   | 'system.note'
   | 'llm.request'
   | 'llm.response'
+  | 'llm.retry'
   | 'tool.call'
   | 'tool.result'
   | 'policy.decision'
@@ -59,6 +60,13 @@ export interface LlmRequestData {
   messageCount: number;
 }
 
+export interface LlmRetryData {
+  /** 失败的尝试序号（第 attempt 次失败后重试） */
+  attempt: number;
+  error: string;
+  delayMs: number;
+}
+
 export interface ToolCallPayload {
   id: string;
   name: string;
@@ -80,6 +88,8 @@ export interface LlmResponseData {
   latencyMs: number;
   /** 压缩摘要等辅助调用不进入对话历史 */
   inHistory: boolean;
+  /** 流式响应未回传 usage 时按字符估算 */
+  usageEstimated?: boolean;
 }
 
 export interface PolicyDecisionData {

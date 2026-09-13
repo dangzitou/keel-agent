@@ -43,6 +43,30 @@ const verifyPass = () =>
   step(null, { name: 'verify', args: { commands: ['node -e "process.exit(0)"'] } }, 'v');
 const done = () => step('任务完成，验证已通过。');
 
+test('预算熔断: 花费超上限立即停止并落 budget.exceeded 事件', async () => {
+  const { cwd } = fixture();
+  const bigSpend = () => ({
+    message: {
+      content: null,
+      tool_calls: [
+        { id: 'x1', type: 'function' as const, function: { name: 'write', arguments: '{"path":"a.txt","content":"x"}' } },
+      ],
+    },
+    usage: { inputTokens: 200_000, outputTokens: 20_000 }, // ≈ $0.076（deepseek-chat 价）
+  });
+  setMockScript([bigSpend, done]);
+  const cfg = loadConfig(cwd).cfg;
+  cfg.budget.maxUsdPerSession = 0.01;
+  const store = mkStore(cwd);
+  const ui = new QuietUi();
+
+  const summary = await runUserTurn({ store, cfg, ui, interactive: false, userText: '大花销任务', autoApprove: true });
+
+  assert.equal(summary.stopReason, 'budget');
+  assert.ok(!fs.existsSync(path.join(cwd, 'a.txt')), '熔断发生在工具执行前');
+  assert.ok(store.readAll().some((e) => e.type === 'budget.exceeded'));
+});
+
 test('全链路: write → verify → done，证据落盘且事件完整', async () => {
   const { cwd } = fixture();
   setMockScript([writeHello, verifyPass, done]);
@@ -82,6 +106,26 @@ test('完成契约: 模型跳过 verify 会被 harness 打回，最终标记 unv
   assert.equal(summary.evidenceOk, false);
   const notes = store.readAll().filter((e) => e.type === 'system.note' && e.data.toModel);
   assert.equal(notes.length, 2, '应打回 MAX_PUSHBACKS 次');
+});
+
+test('中断传导: signal 中途触发后，turn.completed(aborted) 完整落盘', async () => {
+  const { cwd } = fixture();
+  const controller = new AbortController();
+  const abortMidCall = () => {
+    controller.abort(); // 模拟用户在 LLM 调用期间按下 Ctrl+C
+    return writeHello();
+  };
+  setMockScript([abortMidCall, done]);
+  const cfg = loadConfig(cwd).cfg;
+  const store = mkStore(cwd);
+  const ui = new QuietUi();
+
+  const summary = await runUserTurn({ store, cfg, ui, interactive: false, userText: '会被中断的任务', autoApprove: true, signal: controller.signal });
+
+  assert.equal(summary.stopReason, 'aborted');
+  const completed = store.readAll().filter((e) => e.type === 'turn.completed');
+  assert.equal(completed.length, 1, '中断也要落 turn.completed');
+  assert.equal(completed[0]!.data.stopReason, 'aborted');
 });
 
 test('策略拦截: 拒绝写 .env，模型正常收尾且不算修改', async () => {

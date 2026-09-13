@@ -152,28 +152,46 @@ export const bashTool: ToolDef = {
     const command = String(input.command ?? '');
     const timeoutMs = Math.min(600_000, Math.max(1000, Number(input.timeoutMs) || 120_000));
     return new Promise((resolve) => {
-      const child = spawn('/bin/bash', ['-c', command], { cwd: ctx.cwd, env: process.env });
+      // detached 建独立进程组：超时/中断时整组杀死，避免孙进程泄漏
+      const child = spawn('/bin/bash', ['-c', command], { cwd: ctx.cwd, env: process.env, detached: true });
       let out = '';
+      let capped = false;
       const collect = (chunk: Buffer) => {
+        if (out.length >= 200_000) {
+          capped = true;
+          return;
+        }
         out += chunk.toString();
       };
       child.stdout.on('data', collect);
       child.stderr.on('data', collect);
-      const timer = setTimeout(() => {
-        child.kill('SIGKILL');
-      }, timeoutMs);
-      child.on('close', (code, signal) => {
+      const killTree = () => {
+        try {
+          if (child.pid) process.kill(-child.pid, 'SIGKILL');
+        } catch {
+          child.kill('SIGKILL');
+        }
+      };
+      const timer = setTimeout(killTree, timeoutMs);
+      const onAbort = () => killTree();
+      ctx.signal?.addEventListener('abort', onAbort, { once: true });
+      const cleanup = () => {
         clearTimeout(timer);
+        ctx.signal?.removeEventListener('abort', onAbort);
+      };
+      child.on('close', (code, signal) => {
+        cleanup();
+        if (capped) out += '\n…[输出超上限 200k 字符，已截断]…';
         const tail = truncateOutput(out);
-        const status = signal ? `信号 ${signal} 终止（超时 ${timeoutMs}ms？）` : `exit ${code}`;
+        const status = signal ? `信号 ${signal} 终止${signal === 'SIGKILL' ? '（超时或被中断）' : ''}` : `exit ${code}`;
         resolve({
-          ok: code === 0 && !signal,
+          ok: code === 0 && !signal && !(ctx.signal?.aborted ?? false),
           output: tail ? `${tail}\n[${status}]` : `[${status}]`,
           exitCode: signal ? -1 : (code ?? -1),
         });
       });
       child.on('error', (e) => {
-        clearTimeout(timer);
+        cleanup();
         resolve(err(`无法启动进程: ${e.message}`));
       });
     });

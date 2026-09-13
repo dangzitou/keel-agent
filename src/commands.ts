@@ -1,7 +1,11 @@
+import { execSync } from 'node:child_process';
+import fs from 'node:fs';
 import { Event } from './events/types.js';
-import { SessionStore } from './core/store.js';
+import { SessionStore, keelHome } from './core/store.js';
 import { fold } from './core/fold.js';
 import { renderEventLine, Ui } from './ui/render.js';
+import { hasKnownPrice } from './llm/cost.js';
+import { loadConfig } from './config.js';
 
 export function listSessions(ui: Ui): void {
   const metas = SessionStore.list();
@@ -75,4 +79,76 @@ export function costReport(id: string, ui: Ui): void {
 /** 导出事件流为 JSON（对接评测/回归集的口子） */
 export function exportEvents(id: string): Event[] {
   return SessionStore.open(id).readAll();
+}
+
+export interface DoctorCheck {
+  name: string;
+  level: 'ok' | 'warn' | 'fail';
+  detail: string;
+}
+
+/** 环境体检：配置、密钥、价目、验证命令、目录可写性，生产部署前先跑一遍 */
+export function doctor(): { checks: DoctorCheck[]; ok: boolean } {
+  const checks: DoctorCheck[] = [];
+  const add = (name: string, level: DoctorCheck['level'], detail: string) => checks.push({ name, level, detail });
+
+  const [maj, min] = process.versions.node.split('.').map(Number);
+  add('node', maj! > 18 || (maj === 18 && min! >= 17) ? 'ok' : 'fail', `node ${process.versions.node}（要求 >= 18.17）`);
+
+  try {
+    fs.mkdirSync(keelHome(), { recursive: true });
+    fs.accessSync(keelHome(), fs.constants.W_OK);
+    add('keel-home', 'ok', keelHome());
+  } catch (e) {
+    add('keel-home', 'fail', `不可写: ${(e as Error).message}`);
+  }
+
+  let cfg;
+  try {
+    cfg = loadConfig().cfg;
+    add('config', 'ok', `router.main=${cfg.router.main}`);
+  } catch (e) {
+    add('config', 'fail', (e as Error).message);
+    return { checks, ok: false };
+  }
+
+  for (const role of ['main', 'fast'] as const) {
+    const ref = cfg.router[role];
+    const slash = ref.indexOf('/');
+    if (slash < 1) {
+      add(`router.${role}`, 'fail', `"${ref}" 格式应为 provider/model`);
+      continue;
+    }
+    const providerName = ref.slice(0, slash);
+    const pcfg = cfg.providers[providerName];
+    if (!pcfg) {
+      add(`router.${role}`, 'fail', `未知 provider "${providerName}"`);
+      continue;
+    }
+    if (process.env.KEEL_MOCK === '1') {
+      add(`router.${role}`, 'warn', 'KEEL_MOCK=1，使用确定性 mock 模型');
+    } else if (!process.env[pcfg.apiKeyEnv]) {
+      add(`router.${role}`, 'fail', `缺少环境变量 ${pcfg.apiKeyEnv}`);
+    } else {
+      add(`router.${role}`, 'ok', `${ref}（${pcfg.apiKeyEnv} 已设置）`);
+    }
+    if (!hasKnownPrice(ref)) {
+      add(`price.${role}`, 'warn', `${ref} 不在价目表中，费用将记为 $0（可在 src/llm/cost.ts 增补）`);
+    }
+  }
+
+  if (cfg.verify.commands.length === 0) {
+    add('verify', 'warn', 'verify.commands 为空：完成契约要求 agent 显式传命令，建议在 .keel.json 配置（如 ["npm test"]）');
+  } else {
+    add('verify', 'ok', cfg.verify.commands.join(' && '));
+  }
+
+  try {
+    execSync('git --version', { stdio: 'ignore' });
+    add('git', 'ok', '可用');
+  } catch {
+    add('git', 'warn', '不可用：会话将缺少分支信息');
+  }
+
+  return { checks, ok: checks.every((c) => c.level !== 'fail') };
 }

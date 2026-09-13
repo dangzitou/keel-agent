@@ -2,8 +2,15 @@ import { KeelConfig } from '../config.js';
 import { ChatMessage, ChatResult, ToolSchema } from './types.js';
 import { OpenAICompatProvider, MockProvider } from './provider.js';
 import { costFor } from './cost.js';
+import { withRetry } from './retry.js';
 
-/** 模型路由 + 计费入口。所有 LLM 调用都经过这里，成本天然可归因。 */
+export interface ChatCallOpts {
+  onDelta?: (text: string) => void;
+  signal?: AbortSignal;
+  onRetry?: (failedAttempt: number, error: Error, delayMs: number) => void;
+}
+
+/** 模型路由 + 计费入口。所有 LLM 调用都经过这里：重试、超时、流式、成本归因集中处理。 */
 export class Router {
   private cache = new Map<string, { modelRef: string; model: string; provider: OpenAICompatProvider | MockProvider }>();
 
@@ -49,17 +56,31 @@ export class Router {
     return entry;
   }
 
-  /** 发起一次对话并折算成本 */
+  /** 发起一次对话：重试 + 超时 + 可选流式，返回折算成本后的结果 */
   async chat(
     role: 'main' | 'fast',
     messages: ChatMessage[],
     tools?: ToolSchema[],
+    opts: ChatCallOpts = {},
   ): Promise<ChatResult & { model: string; costUsd: number; latencyMs: number }> {
     const { modelRef, model, provider } = this.resolve(role);
+    const params = {
+      model,
+      messages,
+      tools,
+      stream: Boolean(opts.onDelta) && this.cfg.llm.stream,
+      onDelta: opts.onDelta,
+      signal: opts.signal,
+      timeoutMs: this.cfg.llm.timeoutMs,
+    };
     const t0 = Date.now();
-    const res = await provider.chat({ model, messages, tools });
+    const { result } = await withRetry((attempt) => provider.chat(params), {
+      retries: this.cfg.llm.retries,
+      signal: opts.signal,
+      onRetry: opts.onRetry,
+    });
     const latencyMs = Date.now() - t0;
-    const costUsd = costFor(modelRef, res.usage.inputTokens, res.usage.outputTokens);
-    return { ...res, model, costUsd, latencyMs };
+    const costUsd = costFor(modelRef, result.usage.inputTokens, result.usage.outputTokens);
+    return { ...result, model, costUsd, latencyMs };
   }
 }

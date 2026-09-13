@@ -1,6 +1,6 @@
 # Keel（龙骨）
 
-**可回放、可验证、可审计的编码智能体 CLI。** 零运行时依赖，OpenAI 兼容接口通吃 DeepSeek / GLM / Kimi / Qwen / OpenAI。
+**可回放、可验证、可审计的编码智能体 CLI。** 运行时零依赖，OpenAI 兼容接口通吃 DeepSeek / GLM / Kimi / Qwen / OpenAI。支持流式输出、瞬态错误自动重试、Ctrl+C 安全中断。
 
 ```
 keel run "修复登录超时的 bug，并确保测试通过"
@@ -71,9 +71,12 @@ KEEL_MOCK=1 node dist/index.js run "写个 hello"
 | `keel replay <id>` | 只读回放事件流 |
 | `keel fork <id> [--at <seq>]` | 从第 seq 个事件分叉新会话 |
 | `keel cost <id>` | 成本报告 |
+| `keel doctor` | 环境体检：node 版本、配置、密钥、价目、验证命令、目录可写性 |
 | `keel init` | 生成配置模板 |
 
 REPL 内命令：`/help /new /sessions /replay /fork /cost /policy /exit`。
+
+**可靠性设计**：LLM 调用对 429/5xx/网络错误做指数退避重试（`llm.retries`，尊重 `Retry-After`），单请求超时可配（`llm.timeoutMs`）；每次重试落 `llm.retry` 事件可审计。Ctrl+C 触发 AbortSignal 全程传导——进行中的 fetch 与 bash 进程组被终止，`turn.completed(aborted)` 完整落盘，`keel run` 以退出码 130 结束。回合进行中在 REPL 输入的文本会排队，不丢弃。
 
 ## 架构
 
@@ -94,7 +97,7 @@ src/
 └── index.ts / repl.ts / commands.ts
 ```
 
-**事件 schema**（信封 `seq / id / ts / session / parent / forkedAtSeq / type / data`，14 种 type：`session.started`、`user.message`、`system.note`、`llm.request`、`llm.response`、`tool.call`、`tool.result`、`policy.decision`、`verify.started`、`verify.result`、`context.compacted`、`turn.completed`、`budget.exceeded`、`error`）。
+**事件 schema**（信封 `seq / id / ts / session / parent / forkedAtSeq / type / data`，15 种 type：`session.started`、`user.message`、`system.note`、`llm.request`、`llm.response`、`llm.retry`、`tool.call`、`tool.result`、`policy.decision`、`verify.started`、`verify.result`、`context.compacted`、`turn.completed`、`budget.exceeded`、`error`）。
 
 关键设计约束：
 
@@ -102,15 +105,53 @@ src/
 - 任何状态都可从事件重放推导，所以重放本身就是回归测试
 - harness 的不变量（完成契约、策略、预算）在 loop 层强制，不依赖提示词自觉
 
-## 测试
+## 配置参考
+
+全局 `~/.keel/config.json` 与项目 `.keel.json` 合并（项目优先）：
+
+```jsonc
+{
+  "router": { "main": "deepseek/deepseek-chat", "fast": "deepseek/deepseek-chat" },
+  "budget": { "maxUsdPerSession": 2 },
+  "llm": { "retries": 3, "timeoutMs": 600000, "stream": true },
+  "verify": { "commands": ["npm test"] },
+  "policy": {
+    "denyPaths": ["**/.env", "**/*.pem"],
+    "bashDeny": ["sudo *"],
+    "bashApprove": ["git push*"],
+    "readOnly": false,
+    "constrainToWorkspace": true
+  },
+  "context": { "compactThresholdTokens": 48000, "keepRecentMessages": 6 },
+  "maxTurns": 40
+}
+```
+
+API key 只从环境变量读取（`providers.<name>.apiKeyEnv` 指定变量名），不落配置文件。
+
+## 安全边界（务必阅读）
+
+Keel 是策略层 + 审计层，**不是操作系统级沙箱**：
+
+- `constrainToWorkspace`（默认开）只约束 read/write/edit/glob/grep；**bash 不受路径约束**——`cat /etc/passwd` 这类命令绕过路径策略，依赖 `bashDeny`/`bashApprove` 与人工审批
+- `bashDeny`/`bashApprove` 是朴素模式匹配，可被引号/变量绕过，是最低保障而非安全边界
+- 需要强隔离时，请把 keel 放进容器/VM 运行（roadmap：内置 worktree/容器隔离）
+- 事件流会记录工具输入（含 write 的完整文件内容），敏感仓库注意会话目录的访问权限与留存策略
+- 模型可能被仓库内容注入指令：完成契约与策略层是兜底，高危操作请保持审批开启
+
+**平台**：macOS / Linux（bash 依赖）。`keel run` 退出码约定：`0` done、`1` 失败/预算/超轮次、`3` 存在未验证修改、`130` 被中断——CI 可直接按退出码分派。
+
+## 测试与 CI
 
 ```bash
-npm test    # 13 个用例：glob/策略/fold/事件流/fork + mock 全链路（含契约打回与策略拦截）
+npm test    # 23 个用例：glob/策略(含目录约束)/fold/fork/重试/流式聚合 + mock 全链路（契约打回、预算熔断、策略拦截）
 ```
+
+GitHub Actions（`.github/workflows/ci.yml`）在 Node 20/22 上跑 build + test + mock 模式端到端 smoke。
 
 ## Roadmap
 
 - what-if 分叉：替换某个工具结果后重跑（fork 的完全体）
-- worktree 并行：planner-worker 多任务隔离执行，产出分支/PR
+- worktree/容器隔离：planner-worker 多任务隔离执行，产出分支/PR；bash 的强沙箱
 - 会话回归集：把历史会话导出为评测用例（`exportEvents` 已留口）
-- 流式输出、子代理、MCP 兼容层
+- 子代理、MCP 兼容层、Windows 支持

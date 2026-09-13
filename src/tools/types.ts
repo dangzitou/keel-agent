@@ -6,6 +6,8 @@ export interface ToolCtx {
   cfg: KeelConfig;
   store: SessionStore;
   interactive: boolean;
+  /** 用户中断信号：bash 等长操作应响应 */
+  signal?: AbortSignal;
 }
 
 export interface ToolOutput {

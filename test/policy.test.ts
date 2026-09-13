@@ -30,3 +30,14 @@ test('策略: 只读模式拦截一切写路径', () => {
   assert.equal(checkPolicy(p, { tool: 'bash', input: { command: 'ls' }, cwd }).decision, 'deny');
   assert.equal(checkPolicy(p, { tool: 'read', input: { path: 'a.txt' }, cwd }).decision, 'allow');
 });
+
+test('策略: constrainToWorkspace 默认拦截工作目录外路径', () => {
+  const ws = '/tmp/keel-ws';
+  const p = policy();
+  assert.equal(checkPolicy(p, { tool: 'write', input: { path: '/etc/passwd' }, cwd: ws }).decision, 'deny');
+  assert.equal(checkPolicy(p, { tool: 'read', input: { path: '../outside.txt' }, cwd: ws }).decision, 'deny');
+  assert.equal(checkPolicy(p, { tool: 'glob', input: { path: '/Users' }, cwd: ws }).decision, 'deny');
+  assert.equal(checkPolicy(p, { tool: 'write', input: { path: 'src/a.ts' }, cwd: ws }).decision, 'allow');
+  const off = policy({ constrainToWorkspace: false });
+  assert.equal(checkPolicy(off, { tool: 'write', input: { path: '/etc/passwd' }, cwd: ws }).decision, 'allow');
+});

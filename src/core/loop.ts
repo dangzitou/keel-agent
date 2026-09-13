@@ -21,7 +21,8 @@ export interface TurnOptions {
   /** 非交互模式下 approve 判定是否自动放行（--yes） */
   autoApprove: boolean;
   maxTurns?: number;
-  isAborted?: () => boolean;
+  /** 用户中断信号：传导到 LLM fetch 与 bash 子进程，并在事件流落 aborted */
+  signal?: AbortSignal;
 }
 
 export interface TurnSummary {
@@ -48,6 +49,7 @@ export function buildSystemPrompt(cfg: KeelConfig, cwd: string): string {
     '',
     '可用工具: ' + TOOL_NAMES.join(', ') + '。',
     '工作准则:',
+    '- 只在当前工作目录内读写文件（策略默认强制，越界会被拒绝）。',
     '- 修改文件前先 read 确认现状；编辑优先用 edit 精确替换，避免无意义地整文件重写。',
     '- 不了解仓库结构时先用 glob/grep 探索，再动手。',
     '- bash 只做必要操作，避免破坏性命令。',
@@ -74,7 +76,7 @@ function messagesToText(messages: ChatMessage[]): string {
 }
 
 /** 上下文压缩：用 fast 模型把旧消息折叠成摘要。事件流里全量历史永远在，fork 回去即可还原。 */
-async function maybeCompact(store: SessionStore, cfg: KeelConfig, ui: Ui, router: Router): Promise<void> {
+async function maybeCompact(store: SessionStore, cfg: KeelConfig, ui: Ui, router: Router, signal?: AbortSignal): Promise<void> {
   const st = fold(store.readAll());
   if (estimateTokens(st.messages) <= cfg.context.compactThresholdTokens) return;
 
@@ -94,7 +96,7 @@ async function maybeCompact(store: SessionStore, cfg: KeelConfig, ui: Ui, router
         '你是对话摘要器。把 agent 会话历史压缩成要点，必须保留：任务目标、已修改的文件路径与改动内容、关键决策、当前状态与未完成事项、验证状态。',
     },
     { role: 'user', content: messagesToText(toSummarize).slice(0, 60_000) },
-  ]);
+  ], undefined, { signal });
   await store.append('llm.response', {
     role: 'fast',
     model: res.model,
@@ -118,8 +120,9 @@ async function maybeCompact(store: SessionStore, cfg: KeelConfig, ui: Ui, router
  */
 export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
   const { store, cfg, ui } = opts;
-  const ctx: ToolCtx = { cwd: store.meta.cwd, cfg, store, interactive: opts.interactive };
+  const ctx: ToolCtx = { cwd: store.meta.cwd, cfg, store, interactive: opts.interactive, signal: opts.signal };
   const router = new Router(cfg);
+  const aborted = () => opts.signal?.aborted ?? false;
 
   const ev = await store.append('user.message', { text: opts.userText });
   store.setTitle(opts.userText.slice(0, 60));
@@ -132,12 +135,12 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
   let iter = 0;
 
   for (iter = 1; iter <= maxIters; iter++) {
-    if (opts.isAborted?.()) {
+    if (aborted()) {
       stop = 'aborted';
       break;
     }
 
-    await maybeCompact(store, cfg, ui, router);
+    await maybeCompact(store, cfg, ui, router, opts.signal);
     const st = fold(store.readAll());
     const messages: ChatMessage[] = [sys, ...st.messages];
 
@@ -151,9 +154,23 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
     ui.spinStart(`思考中 · ${router.modelRef('main')}`);
     let res;
     try {
-      res = await router.chat('main', messages, TOOL_SCHEMAS);
+      res = await router.chat('main', messages, TOOL_SCHEMAS, {
+        onDelta: (s) => {
+          ui.spinStop();
+          ui.assistantDelta(s);
+        },
+        signal: opts.signal,
+        onRetry: (failedAttempt, error, delayMs) => {
+          store.append('llm.retry', { attempt: failedAttempt, error: error.message, delayMs });
+          ui.note(`LLM 第 ${failedAttempt} 次调用失败（${error.message.slice(0, 140)}），${(delayMs / 1000).toFixed(1)}s 后重试`);
+        },
+      });
     } catch (e) {
       ui.spinStop();
+      if (aborted()) {
+        stop = 'aborted';
+        break;
+      }
       const msg = (e as Error).message ?? String(e);
       await store.append('error', { where: 'llm', message: msg });
       ui.error(`LLM 调用失败: ${msg}`);
@@ -175,6 +192,7 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
       costUsd: res.costUsd,
       latencyMs: res.latencyMs,
       inHistory: true,
+      usageEstimated: res.usageEstimated ?? false,
     });
     if (res.message.content?.trim()) ui.assistantText(res.message.content);
 
@@ -205,7 +223,7 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
     }
 
     for (const call of calls) {
-      if (opts.isAborted?.()) {
+      if (aborted()) {
         stop = 'aborted';
         break;
       }

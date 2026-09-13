@@ -12,6 +12,17 @@ export interface PolicyCfg {
   bashDeny: string[];
   bashApprove: string[];
   readOnly: boolean;
+  /** 禁止读写工作目录之外的路径（默认开启；bash 不受此约束，见 README 安全边界） */
+  constrainToWorkspace: boolean;
+}
+
+export interface LlmCfg {
+  /** 瞬态错误（429/5xx/网络）的最大重试次数 */
+  retries: number;
+  /** 单次请求超时毫秒 */
+  timeoutMs: number;
+  /** SSE 流式输出（部分兼容网关不支持时可关） */
+  stream: boolean;
 }
 
 export interface KeelConfig {
@@ -20,6 +31,7 @@ export interface KeelConfig {
   router: { main: string; fast: string };
   budget: { maxUsdPerSession: number };
   policy: PolicyCfg;
+  llm: LlmCfg;
   /** 完成契约的默认验证命令 */
   verify: { commands: string[] };
   context: { compactThresholdTokens: number; keepRecentMessages: number };
@@ -44,7 +56,9 @@ export function defaultConfig(): KeelConfig {
       bashDeny: ['rm -rf /', 'rm -rf /*', 'sudo *', 'shutdown*', 'mkfs*', 'dd if=*'],
       bashApprove: ['git push*', 'rm *', 'npm publish*', 'mv * /', 'chmod -R *'],
       readOnly: false,
+      constrainToWorkspace: true,
     },
+    llm: { retries: 3, timeoutMs: 600_000, stream: true },
     verify: { commands: [] },
     context: { compactThresholdTokens: 48000, keepRecentMessages: 6 },
     maxTurns: 40,
@@ -106,8 +120,9 @@ export function configTemplate(): string {
       _说明: {
         providers: '内置 deepseek/zhipu/moonshot/qwen/openai；apiKeyEnv 指定从哪个环境变量读密钥',
         router: '格式 provider/model；main 干活，fast 做上下文压缩等便宜活',
+        llm: 'retries=瞬态错误重试次数；timeoutMs=单请求超时；stream=流式输出',
         verify: '完成契约的默认验证命令，agent 修改文件后必须跑通才能声明完成',
-        policy: 'denyPaths 拦路径（读和写都拦）；bashDeny 直接拒绝；bashApprove 需要人工确认',
+        policy: 'denyPaths 拦路径（读和写都拦）；constrainToWorkspace 禁止出工作目录；bashDeny 直接拒绝；bashApprove 需人工确认',
       },
     },
     null,

@@ -5,6 +5,8 @@ import { bareModel, hasKnownPrice } from '../llm/cost.js';
 
 export interface Ui {
   assistantText(text: string | null): void;
+  /** 流式增量：文本片段逐段到达（实现需自行处理拼接/换行） */
+  assistantDelta(text: string): void;
   toolStart(name: string, input: Record<string, unknown>): void;
   toolResult(ok: boolean, output: string, durationMs: number): void;
   note(text: string): void;
@@ -41,8 +43,20 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
 export class TerminalUi implements Ui {
   private timer: NodeJS.Timeout | null = null;
   private frame = 0;
+  private streamedAny = false;
+
+  assistantDelta(text: string): void {
+    if (!text) return;
+    this.streamedAny = true;
+    process.stdout.write(text);
+  }
 
   assistantText(text: string | null): void {
+    if (this.streamedAny) {
+      this.streamedAny = false;
+      if (text !== null) console.log();
+      return;
+    }
     if (text?.trim()) console.log(text.trim());
   }
 
@@ -115,10 +129,14 @@ export class TerminalUi implements Ui {
 /** 测试与非交互场景用：只记录不打印 */
 export class QuietUi implements Ui {
   logs: string[] = [];
+  streamed: string[] = [];
   approveAnswer = false;
 
   private log(s: string): void {
     this.logs.push(s);
+  }
+  assistantDelta(text: string): void {
+    if (text) this.streamed.push(text);
   }
   assistantText(text: string | null): void {
     if (text?.trim()) this.log(`assistant: ${text}`);

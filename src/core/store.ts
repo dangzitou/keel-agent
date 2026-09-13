@@ -33,6 +33,8 @@ export class SessionStore {
   readonly dir: string;
   private readonly eventsFile: string;
   private _seq = 0;
+  /** 已解析事件缓存：append 增量维护，避免长会话反复全量读盘 */
+  private cache: Event[] | null = null;
   meta: SessionMeta;
 
   private constructor(dir: string, meta: SessionMeta, seq: number) {
@@ -128,6 +130,7 @@ export class SessionStore {
       data,
     };
     fs.appendFileSync(this.eventsFile, JSON.stringify(e) + '\n', 'utf8');
+    this.cache?.push(e as Event);
     this.meta.updatedAt = e.ts;
     this.saveMeta();
     return e;
@@ -142,19 +145,24 @@ export class SessionStore {
   importPrefix(events: Event[]): void {
     fs.writeFileSync(this.eventsFile, events.map((e) => JSON.stringify(e)).join('\n') + (events.length ? '\n' : ''), 'utf8');
     this._seq = events.length ? events[events.length - 1]!.seq : 0;
+    this.cache = null;
   }
 
+  /** 返回缓存引用——调用方不得原地修改（fold 是只读遍历） */
   readAll(): Event[] {
-    if (!fs.existsSync(this.eventsFile)) return [];
+    if (this.cache) return this.cache;
     const out: Event[] = [];
-    for (const line of fs.readFileSync(this.eventsFile, 'utf8').split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        out.push(JSON.parse(line));
-      } catch {
-        /* 尾部半行（崩溃残留）直接忽略：append-only 日志的可容忍点 */
+    if (fs.existsSync(this.eventsFile)) {
+      for (const line of fs.readFileSync(this.eventsFile, 'utf8').split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          out.push(JSON.parse(line));
+        } catch {
+          /* 尾部半行（崩溃残留）直接忽略：append-only 日志的可容忍点 */
+        }
       }
     }
+    this.cache = out;
     return out;
   }
 
