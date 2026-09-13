@@ -84,6 +84,12 @@ export class OpenAICompatProvider implements LlmProvider {
         signal: requestSignal(params.signal, params.timeoutMs ?? 600_000),
       });
     } catch (e) {
+      // 用户主动中断：标记 noRetry，避免 withRetry 把它当网络错误重试
+      if (params.signal?.aborted) {
+        const err = new Error(`请求被中断: ${(e as Error).message}`) as Error & { noRetry: boolean };
+        err.noRetry = true;
+        throw err;
+      }
       throw new Error(`无法连接 ${url}: ${(e as Error).message}`);
     }
     if (!res.ok) {

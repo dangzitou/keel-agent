@@ -144,7 +144,9 @@ Keel 是策略层 + 审计层，**不是操作系统级沙箱**：
 ## 测试与 CI
 
 ```bash
-npm test    # 23 个用例：glob/策略(含目录约束)/fold/fork/重试/流式聚合 + mock 全链路（契约打回、预算熔断、策略拦截）
+npm test    # 30 个用例：glob/策略(含目录约束)/fold/fork/重试/流式聚合 + mock 全链路（契约打回、预算熔断、策略拦截）
+            # + 本地 SSE 服务器集成测试（chatStream 消费真实流式分片、agent loop 全链路走真实 SSE）
+            # + 真实 SIGINT 投递测试（keel run 子进程 exit 130 + aborted 事件落盘）
 ```
 
 GitHub Actions（`.github/workflows/ci.yml`）在 Node 20/22 上跑 build + test + mock 模式端到端 smoke。
