@@ -46,7 +46,7 @@ export const DEFAULT_PROVIDERS: Record<string, ProviderCfg> = {
   deepseek: { baseURL: 'https://api.deepseek.com', apiKeyEnv: 'DEEPSEEK_API_KEY' },
   zhipu: { baseURL: 'https://open.bigmodel.cn/api/paas/v4', apiKeyEnv: 'ZHIPU_API_KEY' },
   'glm-anthropic': { baseURL: 'https://open.bigmodel.cn/api/anthropic', apiKeyEnv: 'ZHIPU_API_KEY', api: 'anthropic' },
-  stepfun: { baseURL: 'https://api.stepfun.com/step_plan', apiKeyEnv: 'STEPFUN_API_KEY', api: 'responses' },
+  stepfun: { baseURL: 'https://api.stepfun.com/step_plan/v1', apiKeyEnv: 'STEPFUN_API_KEY', api: 'responses' },
   moonshot: { baseURL: 'https://api.moonshot.cn/v1', apiKeyEnv: 'MOONSHOT_API_KEY' },
   qwen: { baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', apiKeyEnv: 'DASHSCOPE_API_KEY' },
   openai: { baseURL: 'https://api.openai.com/v1', apiKeyEnv: 'OPENAI_API_KEY' },
@@ -129,12 +129,13 @@ const AUTO_MODEL: Array<[provider: string, model: string]> = [
 ];
 
 /**
- * 易用性默认值：router 仍是出厂默认（deepseek）且其 key 不在时，
+ * 易用性默认值：仅当 router 仍是出厂默认（deepseek/deepseek-chat）且其 key 不在时，
  * 自动切到环境里有 key 的内置 provider（多个在场时按上表优先级取第一个）——
- * "export 一个 key 即可用"。
+ * "export 一个 key 即用"。任何显式配置（.keel.json / config.json / KEEL_MODEL）都优先于它。
  */
 export function autoModelFromEnv(providers: Record<string, ProviderCfg>, defaultMain: string): string | null {
-  if (defaultMain.split('/')[0] === 'deepseek' && process.env.DEEPSEEK_API_KEY) return null;
+  if (defaultMain !== 'deepseek/deepseek-chat') return null; // 用户已显式选择，不越权
+  if (process.env.DEEPSEEK_API_KEY) return null;
   for (const [name, model] of AUTO_MODEL) {
     const pcfg = providers[name];
     if (pcfg && process.env[pcfg.apiKeyEnv]) return model;

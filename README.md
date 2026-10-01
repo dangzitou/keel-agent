@@ -122,7 +122,7 @@ Otherwise, global `~/.keel/config.json` merged with project `.keel.json` (projec
 ```jsonc
 {
   "providers": {
-    "stepfun": { "baseURL": "https://api.stepfun.com/step_plan", "apiKeyEnv": "STEPFUN_API_KEY", "api": "responses" }
+    "stepfun": { "baseURL": "https://api.stepfun.com/step_plan/v1", "apiKeyEnv": "STEPFUN_API_KEY", "api": "responses" }
   },
   "router": { "main": "stepfun/step-5-preview", "fast": "deepseek/deepseek-chat" },
   "budget": { "maxUsdPerSession": 2 },
@@ -187,7 +187,7 @@ Platforms: macOS / Linux (bash required).
 ## Testing & CI
 
 ```bash
-npm test   # 30 cases: glob / policy (incl. workspace constraints) / fold / fork / retry / stream aggregation
+npm test   # 46 cases: glob / policy / fold / fork / retry / stream aggregation / plan / protocols (anthropic & responses)
            # + full mock pipeline (contract bounce-back, budget fuse, policy interception)
            # + local SSE server integration test (real streaming chunks through the agent loop)
            # + real SIGINT delivery test (keel run child exits 130, aborted event persisted)

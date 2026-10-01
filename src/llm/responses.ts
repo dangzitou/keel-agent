@@ -11,7 +11,7 @@ export function toResponsesBody(params: ChatParams, stream: boolean): Record<str
       continue;
     }
     if (m.role === 'assistant') {
-      if (m.content) input.push({ role: 'assistant', content: [{ type: 'output_text', text: m.content }] });
+      if (m.content) input.push({ role: 'assistant', content: m.content });
       for (const tc of m.tool_calls ?? []) {
         input.push({ type: 'function_call', call_id: tc.id, name: tc.function.name, arguments: tc.function.arguments || '{}' });
       }
@@ -21,7 +21,8 @@ export function toResponsesBody(params: ChatParams, stream: boolean): Record<str
       input.push({ type: 'function_call_output', call_id: m.tool_call_id ?? '', output: m.content ?? '' });
       continue;
     }
-    input.push({ role: 'user', content: [{ type: 'input_text', text: m.content ?? '' }] });
+    // user/assistant 文本用纯字符串：兼容性最好（部分网关对类型化 content 块翻译有坑）
+    input.push({ role: m.role as 'user' | 'assistant', content: m.content ?? '' });
   }
   return {
     model: params.model,

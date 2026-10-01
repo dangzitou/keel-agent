@@ -122,7 +122,7 @@ KEEL_MODEL=my-model KEEL_BASE_URL=https://gw.example/v1 KEEL_API_KEY=sk-... KEEL
 ```jsonc
 {
   "providers": {
-    "stepfun": { "baseURL": "https://api.stepfun.com/step_plan", "apiKeyEnv": "STEPFUN_API_KEY", "api": "responses" }
+    "stepfun": { "baseURL": "https://api.stepfun.com/step_plan/v1", "apiKeyEnv": "STEPFUN_API_KEY", "api": "responses" }
   },
   "router": { "main": "stepfun/step-5-preview", "fast": "deepseek/deepseek-chat" },
   "budget": { "maxUsdPerSession": 2 },
@@ -187,7 +187,7 @@ Keel 是策略层 + 审计层，**不是操作系统级沙箱**：
 ## 测试与 CI
 
 ```bash
-npm test    # 30 个用例：glob/策略(含目录约束)/fold/fork/重试/流式聚合 + mock 全链路（契约打回、预算熔断、策略拦截）
+npm test    # 46 个用例：glob/策略/fold/fork/重试/流式聚合/plan/双协议（anthropic 与 responses）+ mock 全链路（契约打回、预算熔断、策略拦截）
             # + 本地 SSE 服务器集成测试（chatStream 消费真实流式分片、agent loop 全链路走真实 SSE）
             # + 真实 SIGINT 投递测试（keel run 子进程 exit 130 + aborted 事件落盘）
 ```

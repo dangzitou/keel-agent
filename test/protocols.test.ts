@@ -39,9 +39,11 @@ test('anthropic: 响应转换（text + tool_use → 内部消息）', () => {
   assert.deepEqual(r.usage, { inputTokens: 10, outputTokens: 4 });
 });
 
-test('responses: 请求体转换（instructions、function_call/output 项）', () => {
+test('responses: 请求体转换（instructions、纯字符串 content、function_call/output 项）', () => {
   const body = toResponsesBody({ model: 'step-5-preview', messages: MESSAGES }, false) as Record<string, any>;
   assert.equal(body.instructions, 'sys-prompt');
+  assert.equal(body.input[0].role, 'user');
+  assert.equal(body.input[0].content, 'hi'); // 纯字符串，网关兼容性最好
   const types = body.input.map((i: any) => i.type ?? `msg:${i.role}`);
   assert.deepEqual(types, ['msg:user', 'function_call', 'function_call_output']);
   assert.equal(body.input[1].call_id, 't1');
