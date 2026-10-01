@@ -36,6 +36,7 @@ keel run "修复登录超时的 bug，并确保测试通过"
 - **`keel fork <id> --at <seq>`**：从任意事件分叉出新会话——"如果它当时没删那个文件会怎样"是可操作的实验
 - **`keel replay <id>`**：只读回放完整执行轨迹（含每步策略判定与成本）
 - **`keel cost <id>`**：按模型/回合的费用审计，精确到每次 LLM 调用
+- **`plan` 规划工具**：计划也是事件——每次更新落进事件流，回放可见计划的演变，fork 后计划状态随之回溯
 - **上下文压缩只是视图替换**：事件流里永远有全量历史，fork 回压缩点即可还原——不像传统 compact，压完细节就永久丢失
 
 ### 2. 证据驱动的完成契约（evidence-driven done）
@@ -101,11 +102,27 @@ REPL 内命令：`/help /new /sessions /replay /fork /cost /policy /exit`。
 
 ## 配置
 
-全局 `~/.keel/config.json` 与项目 `.keel.json` 合并（项目优先）：
+最轻的方式零配置文件——环境变量直配，优先级最高：
+
+```bash
+# 直接引用内置 provider
+KEEL_MODEL=glm-anthropic/glm-5.3 keel run "..."
+KEEL_MODEL=stepfun/step-5-preview keel run "..."
+
+# 或任意自定义端点（api: openai | anthropic | responses）
+KEEL_MODEL=my-model KEEL_BASE_URL=https://gw.example/v1 KEEL_API_KEY=sk-... KEEL_API=anthropic keel run "..."
+```
+
+原生支持三种线协议：OpenAI chat/completions、Anthropic Messages、OpenAI Responses，按 provider 用 `api` 字段指定。内置 provider：`deepseek`、`zhipu`、`glm-anthropic`（智谱 Anthropic 网关）、`stepfun`（Responses）、`moonshot`、`qwen`、`openai`。
+
+否则用全局 `~/.keel/config.json` 与项目 `.keel.json` 合并（项目优先）：
 
 ```jsonc
 {
-  "router": { "main": "deepseek/deepseek-chat", "fast": "deepseek/deepseek-chat" },
+  "providers": {
+    "stepfun": { "baseURL": "https://api.stepfun.com/step_plan", "apiKeyEnv": "STEPFUN_API_KEY", "api": "responses" }
+  },
+  "router": { "main": "stepfun/step-5-preview", "fast": "deepseek/deepseek-chat" },
   "budget": { "maxUsdPerSession": 2 },
   "llm": { "retries": 3, "timeoutMs": 600000, "stream": true },
   "verify": { "commands": ["npm test"] },
@@ -127,22 +144,25 @@ REPL 内命令：`/help /new /sessions /replay /fork /cost /policy /exit`。
 
 ```text
 src/
-├── events/types.ts     # 14 种事件类型（版本化 schema）
+├── events/types.ts     # 16 种事件类型（版本化 schema）
 ├── core/
 │   ├── store.ts        # append-only JSONL 存储（~/.keel/sessions/<id>/）
-│   ├── fold.ts         # 状态 = fold(事件)：消息/花费/验证状态/文件改动
+│   ├── fold.ts         # 状态 = fold(事件)：消息/花费/验证状态/计划/文件改动
 │   └── loop.ts         # agent 循环：完成契约、预算熔断、上下文压缩
 ├── llm/
 │   ├── provider.ts     # OpenAI 兼容客户端 + 确定性 mock
+│   ├── anthropic.ts    # Anthropic Messages 协议客户端
+│   ├── responses.ts    # OpenAI Responses 协议客户端
+│   ├── http.ts         # 共用 POST / SSE / 中断语义
 │   ├── router.ts       # main/fast 角色路由
 │   └── cost.ts         # 价目表与计费
 ├── policy/policy.ts    # 声明式策略引擎（deny/approve/allow）
-├── tools/              # read/write/edit/bash/glob/grep/verify
+├── tools/              # plan/read/write/edit/bash/glob/grep/verify
 ├── ui/render.ts        # 终端渲染 + 事件回放渲染
 └── index.ts / repl.ts / commands.ts
 ```
 
-**事件 schema**（信封 `seq / id / ts / session / parent / forkedAtSeq / type / data`，15 种 type：`session.started`、`user.message`、`system.note`、`llm.request`、`llm.response`、`llm.retry`、`tool.call`、`tool.result`、`policy.decision`、`verify.started`、`verify.result`、`context.compacted`、`turn.completed`、`budget.exceeded`、`error`）。
+**事件 schema**（信封 `seq / id / ts / session / parent / forkedAtSeq / type / data`，16 种 type：`session.started`、`user.message`、`system.note`、`llm.request`、`llm.response`、`llm.retry`、`tool.call`、`tool.result`、`plan.updated`、`policy.decision`、`verify.started`、`verify.result`、`context.compacted`、`turn.completed`、`budget.exceeded`、`error`）。
 
 关键设计约束：
 
@@ -178,6 +198,10 @@ GitHub Actions 在 Node 20/22 上跑 build + test + mock 模式端到端 smoke�
 - worktree/容器隔离：planner-worker 多任务隔离执行，产出分支/PR；bash 的强沙箱
 - 会话回归集：把历史会话导出为评测用例（`exportEvents` 已留口）
 - 子代理、MCP 兼容层、Windows 支持
+
+## 参与贡献
+
+Keel 刻意保持小体积，贡献也应保持小——见 [贡献指南](./CONTRIBUTING.zh-CN.md)（[English](./CONTRIBUTING.md)）。最重要的规则只有一条：一切状态必须仍能只从事件流推导。适合上手的切入点：provider 预设、回放渲染、运行时级测试、真实使用故事。
 
 ## 状态
 

@@ -36,6 +36,7 @@ That buys capabilities the message-array model cannot express:
 - `keel fork <id> --at <seq>` — branch a new session from **any past event**: "what if it hadn't deleted that file" becomes a runnable experiment
 - `keel replay <id>` — read-only replay of the full execution trace, including every policy decision and its cost
 - `keel cost <id>` — spend audit per model and per turn, down to individual LLM calls
+- `plan` — the task plan is an event too: every update lands in the stream, replays show how the plan evolved, and a fork restores the plan as it was at that point
 - **Compaction is a view swap**: the event stream always keeps full history; fork back to the compaction point to restore what a traditional `/compact` discards forever
 
 ### 2. "Done" requires evidence
@@ -101,11 +102,27 @@ REPL slash commands: `/help /new /sessions /replay /fork /cost /policy /exit`.
 
 ## Configuration
 
-Global `~/.keel/config.json` merged with project `.keel.json` (project wins):
+The lightest path needs no config file at all — environment variables win over everything:
+
+```bash
+# built-in provider, referenced directly
+KEEL_MODEL=glm-anthropic/glm-5.3 keel run "..."
+KEEL_MODEL=stepfun/step-5-preview keel run "..."
+
+# or any custom endpoint (api: openai | anthropic | responses)
+KEEL_MODEL=my-model KEEL_BASE_URL=https://gw.example/v1 KEEL_API_KEY=sk-... KEEL_API=anthropic keel run "..."
+```
+
+Three wire protocols are spoken natively: OpenAI chat/completions, Anthropic Messages, and OpenAI Responses — pick per provider with the `api` field. Built-in providers: `deepseek`, `zhipu`, `glm-anthropic` (BigModel's Anthropic gateway), `stepfun` (Responses), `moonshot`, `qwen`, `openai`.
+
+Otherwise, global `~/.keel/config.json` merged with project `.keel.json` (project wins):
 
 ```jsonc
 {
-  "router": { "main": "deepseek/deepseek-chat", "fast": "deepseek/deepseek-chat" },
+  "providers": {
+    "stepfun": { "baseURL": "https://api.stepfun.com/step_plan", "apiKeyEnv": "STEPFUN_API_KEY", "api": "responses" }
+  },
+  "router": { "main": "stepfun/step-5-preview", "fast": "deepseek/deepseek-chat" },
   "budget": { "maxUsdPerSession": 2 },
   "llm": { "retries": 3, "timeoutMs": 600000, "stream": true },
   "verify": { "commands": ["npm test"] },
@@ -127,22 +144,25 @@ Global `~/.keel/config.json` merged with project `.keel.json` (project wins):
 
 ```text
 src/
-├── events/types.ts     # 14 event types (versioned schema)
+├── events/types.ts     # 16 event types (versioned schema)
 ├── core/
 │   ├── store.ts        # append-only JSONL store (~/.keel/sessions/<id>/)
-│   ├── fold.ts         # state = fold(events): messages / spend / verification / file changes
+│   ├── fold.ts         # state = fold(events): messages / spend / verification / plan / file changes
 │   └── loop.ts         # agent loop: completion contract, budget fuse, compaction
 ├── llm/
 │   ├── provider.ts     # OpenAI-compatible client + deterministic mock
+│   ├── anthropic.ts    # Anthropic Messages protocol client
+│   ├── responses.ts    # OpenAI Responses protocol client
+│   ├── http.ts         # shared POST / SSE / abort semantics
 │   ├── router.ts       # main/fast role routing
 │   └── cost.ts         # pricing tables and billing
 ├── policy/policy.ts    # declarative policy engine (deny / approve / allow)
-├── tools/              # read / write / edit / bash / glob / grep / verify
+├── tools/              # plan / read / write / edit / bash / glob / grep / verify
 ├── ui/render.ts        # terminal rendering + event replay rendering
 └── index.ts / repl.ts / commands.ts
 ```
 
-Event envelope: `seq / id / ts / session / parent / forkedAtSeq / type / data`, with 15 types: `session.started`, `user.message`, `system.note`, `llm.request`, `llm.response`, `llm.retry`, `tool.call`, `tool.result`, `policy.decision`, `verify.started`, `verify.result`, `context.compacted`, `turn.completed`, `budget.exceeded`, `error`.
+Event envelope: `seq / id / ts / session / parent / forkedAtSeq / type / data`, with 16 types: `session.started`, `user.message`, `system.note`, `llm.request`, `llm.response`, `llm.retry`, `tool.call`, `tool.result`, `plan.updated`, `policy.decision`, `verify.started`, `verify.result`, `context.compacted`, `turn.completed`, `budget.exceeded`, `error`.
 
 Invariants:
 
@@ -179,6 +199,10 @@ GitHub Actions runs build + tests + a mock-mode end-to-end smoke on Node 20/22.
 - Worktree / container isolation: planner-worker execution with branch/PR output; a hard sandbox for bash
 - Session regression sets: export past sessions as eval cases (`exportEvents` hook already reserved)
 - Subagents, an MCP compatibility layer, Windows support
+
+## Contributing
+
+Keel is small on purpose and contributions should stay small too — see [CONTRIBUTING](./CONTRIBUTING.md) ([中文](./CONTRIBUTING.zh-CN.md)). The one rule that matters: every state must stay derivable from the event stream alone. Good first contributions: provider presets, replay rendering, runtime-level tests, and real usage stories.
 
 ## Status
 
