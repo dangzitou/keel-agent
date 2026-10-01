@@ -1,6 +1,6 @@
 {
   "name": "keel-agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Keel Agent（龙骨）—— 可回放、可验证、可审计的编码智能体 CLI（event-sourced, evidence-driven coding agent）",
   "type": "module",
   "bin": {
@@ -24,7 +24,13 @@
     "test": "node --import tsx --test test/*.test.ts",
     "prepack": "npm run build"
   },
-  "keywords": ["agent", "cli", "coding-agent", "event-sourcing", "harness"],
+  "keywords": [
+    "agent",
+    "cli",
+    "coding-agent",
+    "event-sourcing",
+    "harness"
+  ],
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.14.0",
