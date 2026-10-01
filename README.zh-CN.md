@@ -1,6 +1,6 @@
 <div align="center">
 
-# Keel Agent（龙骨）
+<img src=".github/assets/banner.svg" alt="Keel Agent（龙骨）— 可回放、可验证、可审计的编码智能体 CLI" width="880">
 
 **可回放、可验证、可审计的编码智能体 CLI。**
 

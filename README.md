@@ -1,6 +1,6 @@
 <div align="center">
 
-# Keel Agent
+<img src=".github/assets/banner.svg" alt="Keel Agent — replayable, verifiable, auditable coding agent CLI" width="880">
 
 **A replayable, verifiable, auditable coding agent CLI.**
 

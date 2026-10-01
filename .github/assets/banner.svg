@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="220" viewBox="0 0 880 220" role="img" aria-label="Keel Agent">
+  <!-- wordmark -->
+  <text x="60" y="78" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="44" font-weight="700" letter-spacing="2">
+    <tspan fill="#4C8DFF">KEEL</tspan><tspan fill="#6e7681"> AGENT</tspan>
+  </text>
+  <text x="62" y="108" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="15" fill="#6e7681">
+    replayable · verifiable · auditable — the session is an event stream
+  </text>
+
+  <!-- hull hint: the boat above the keel -->
+  <path d="M 90 128 Q 440 168 790 128" fill="none" stroke="#6e7681" stroke-opacity="0.3" stroke-width="1.5"/>
+
+  <!-- the keel: append-only spine -->
+  <line x1="60" y1="172" x2="820" y2="172" stroke="#4C8DFF" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- events on the log -->
+  <g stroke="#8b949e" stroke-width="2" stroke-linecap="round">
+    <line x1="100" y1="166" x2="100" y2="178"/>
+    <line x1="160" y1="166" x2="160" y2="178"/>
+    <line x1="220" y1="166" x2="220" y2="178"/>
+    <line x1="280" y1="166" x2="280" y2="178"/>
+    <line x1="340" y1="166" x2="340" y2="178"/>
+    <line x1="400" y1="166" x2="400" y2="178"/>
+  </g>
+  <!-- fork: branch from one event -->
+  <line x1="400" y1="172" x2="480" y2="130" stroke="#4C8DFF" stroke-width="2" stroke-dasharray="1 6" stroke-linecap="round"/>
+  <circle cx="480" cy="130" r="4" fill="#4C8DFF"/>
+  <!-- events continue past the fork, plus the branch's own line -->
+  <g stroke="#8b949e" stroke-width="2" stroke-linecap="round">
+    <line x1="460" y1="166" x2="460" y2="178"/>
+    <line x1="520" y1="166" x2="520" y2="178"/>
+    <line x1="580" y1="166" x2="580" y2="178"/>
+    <line x1="640" y1="166" x2="640" y2="178"/>
+    <line x1="700" y1="166" x2="700" y2="178"/>
+    <line x1="760" y1="166" x2="760" y2="178"/>
+  </g>
+  <line x1="480" y1="130" x2="600" y2="112" stroke="#4C8DFF" stroke-opacity="0.55" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- baseline caption -->
+  <text x="60" y="204" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="12" fill="#6e7681">
+    fork any event · verify before done · zero runtime dependencies
+  </text>
+</svg>

@@ -3,7 +3,17 @@ import { KeelConfig, loadConfig } from './config.js';
 import { SessionStore } from './core/store.js';
 import { runUserTurn, getGitBranch } from './core/loop.js';
 import { TerminalUi, statusLine } from './ui/render.js';
+import { ansi } from './util/ansi.js';
 import { forkSession, listSessions, replaySession, costReport } from './commands.js';
+
+const BANNER = [
+  '██╗  ██╗ ███████╗███████╗██╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗',
+  '██║ ██╔╝ ██╔════╝██╔════╝██║      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝',
+  '█████╔╝  █████╗  █████╗  ██║      ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ',
+  '██╔═██╗  ██╔══╝  ██╔══╝  ██║      ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ',
+  '██║  ██╗ ███████╗███████╗███████╗ ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ',
+  '╚═╝  ╚═╝ ╚══════╝╚══════╝╚══════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ',
+].join('\n');
 
 const HELP = `命令:
   /help                 本帮助
@@ -30,7 +40,8 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
   const projectCwd = store.meta.cwd;
 
   const bannerModel = process.env.KEEL_MOCK === '1' ? 'mock 模式（KEEL_MOCK=1）' : cfg.router.main;
-  console.log(`\n  keel 龙骨 · 可回放、可验证的编码智能体`);
+  console.log(`\n${ansi.dim(BANNER)}`);
+  console.log(`  龙骨 · 可回放、可验证的编码智能体`);
   console.log(`  模型 ${bannerModel} · 工作目录 ${projectCwd}${getGitBranch(projectCwd) ? ` · 分支 ${getGitBranch(projectCwd)}` : ''}`);
   if (sources.length) console.log(`  配置: ${sources.join(' + ')}`);
   console.log(`  /help 查看命令，直接输入描述任务即可开始\n`);
