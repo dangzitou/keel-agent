@@ -1,22 +1,7 @@
 import { ChatParams, ChatResult, LlmProvider } from './types.js';
+import { estimateUsage, httpError, postJson, requestSignal, sseDataChunks } from './http.js';
 
-/** 组合外部中断信号与超时信号（Node 18 无 AbortSignal.any 时退化为二选一） */
-function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  const any = (AbortSignal as unknown as { any?: (sigs: AbortSignal[]) => AbortSignal }).any;
-  if (any) {
-    return signal ? any([signal, timeout]) : timeout;
-  }
-  return signal ?? timeout;
-}
-
-function httpError(status: number, body: string, retryAfterHeader: string | null): Error & { status: number; retryAfterMs?: number } {
-  const e = new Error(`LLM 请求失败 HTTP ${status}: ${body.slice(0, 500)}`) as Error & { status: number; retryAfterMs?: number };
-  e.status = status;
-  const ra = retryAfterHeader ? Number(retryAfterHeader) * 1000 : NaN;
-  if (Number.isFinite(ra) && ra > 0) e.retryAfterMs = ra;
-  return e;
-}
+export { requestSignal, httpError };
 
 /**
  * SSE 增量聚合器（纯逻辑，可单测）：
@@ -75,28 +60,12 @@ export class OpenAICompatProvider implements LlmProvider {
 
   private async post(params: ChatParams, body: Record<string, unknown>): Promise<Response> {
     const url = `${this.baseURL.replace(/\/+$/, '')}/chat/completions`;
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` },
-        body: JSON.stringify(body),
-        signal: requestSignal(params.signal, params.timeoutMs ?? 600_000),
-      });
-    } catch (e) {
-      // 用户主动中断：标记 noRetry，避免 withRetry 把它当网络错误重试
-      if (params.signal?.aborted) {
-        const err = new Error(`请求被中断: ${(e as Error).message}`) as Error & { noRetry: boolean };
-        err.noRetry = true;
-        throw err;
-      }
-      throw new Error(`无法连接 ${url}: ${(e as Error).message}`);
-    }
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw httpError(res.status, text, res.headers.get('retry-after'));
-    }
-    return res;
+    return postJson(url, {
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` },
+      body,
+      signal: params.signal,
+      timeoutMs: params.timeoutMs,
+    });
   }
 
   private static buildBody(params: ChatParams, stream: boolean): Record<string, unknown> {
@@ -135,30 +104,19 @@ export class OpenAICompatProvider implements LlmProvider {
     const res = await this.post(params, OpenAICompatProvider.buildBody(params, true));
     if (!res.body) throw new Error('流式响应缺少 body');
     const acc = new StreamAccumulator();
-    const decoder = new TextDecoder();
-    let buf = '';
     let emitted = false;
     try {
-      for await (const raw of res.body) {
-        buf += decoder.decode(raw as Uint8Array, { stream: true });
-        let idx: number;
-        while ((idx = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, idx).trim();
-          buf = buf.slice(idx + 1);
-          if (!line.startsWith('data:')) continue;
-          const payload = line.slice(5).trim();
-          if (payload === '[DONE]') continue;
-          try {
-            const chunk = JSON.parse(payload);
-            const before = acc.content;
-            acc.push(chunk);
-            if (acc.content !== before) {
-              emitted = true;
-              params.onDelta?.(acc.content.slice(before.length));
-            }
-          } catch {
-            /* 非 JSON 心流行，忽略 */
+      for await (const payload of sseDataChunks(res)) {
+        try {
+          const chunk = JSON.parse(payload);
+          const before = acc.content;
+          acc.push(chunk);
+          if (acc.content !== before) {
+            emitted = true;
+            params.onDelta?.(acc.content.slice(before.length));
           }
+        } catch {
+          /* 非 JSON 心流行，忽略 */
         }
       }
     } catch (e) {
@@ -175,16 +133,7 @@ export class OpenAICompatProvider implements LlmProvider {
       };
     }
     // 兼容不支持 include_usage 的服务：估算并标记
-    const inputChars = params.messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
-    const outputChars = (message.content?.length ?? 0) + message.tool_calls.reduce((n, tc) => n + tc.function.arguments.length, 0);
-    return {
-      message,
-      usage: {
-        inputTokens: Math.ceil(inputChars / 3),
-        outputTokens: Math.ceil(outputChars / 3),
-      },
-      usageEstimated: true,
-    };
+    return { message, usage: estimateUsage(params.messages, message), usageEstimated: true };
   }
 }
 

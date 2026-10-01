@@ -2,9 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { keelHome } from './core/store.js';
 
+export type ProviderApi = 'openai' | 'anthropic' | 'responses';
+
 export interface ProviderCfg {
   baseURL: string;
   apiKeyEnv: string;
+  /** 线协议：openai=chat/completions（默认）、anthropic=messages、responses=OpenAI Responses */
+  api?: ProviderApi;
 }
 
 export interface PolicyCfg {
@@ -41,6 +45,8 @@ export interface KeelConfig {
 export const DEFAULT_PROVIDERS: Record<string, ProviderCfg> = {
   deepseek: { baseURL: 'https://api.deepseek.com', apiKeyEnv: 'DEEPSEEK_API_KEY' },
   zhipu: { baseURL: 'https://open.bigmodel.cn/api/paas/v4', apiKeyEnv: 'ZHIPU_API_KEY' },
+  'glm-anthropic': { baseURL: 'https://open.bigmodel.cn/api/anthropic', apiKeyEnv: 'ZHIPU_API_KEY', api: 'anthropic' },
+  stepfun: { baseURL: 'https://api.stepfun.com/step_plan', apiKeyEnv: 'STEPFUN_API_KEY', api: 'responses' },
   moonshot: { baseURL: 'https://api.moonshot.cn/v1', apiKeyEnv: 'MOONSHOT_API_KEY' },
   qwen: { baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', apiKeyEnv: 'DASHSCOPE_API_KEY' },
   openai: { baseURL: 'https://api.openai.com/v1', apiKeyEnv: 'OPENAI_API_KEY' },
@@ -83,7 +89,7 @@ export interface LoadedConfig {
   sources: string[];
 }
 
-/** 全局 ~/.keel/config.json 与项目 .keel.json 合并，项目优先 */
+/** 全局 ~/.keel/config.json 与项目 .keel.json 合并，项目优先；最后应用环境变量直配（最轻量的接入方式） */
 export function loadConfig(cwd: string = process.cwd()): LoadedConfig {
   const defaults = defaultConfig();
   const sources: string[] = [];
@@ -92,7 +98,7 @@ export function loadConfig(cwd: string = process.cwd()): LoadedConfig {
   const globalFile = path.join(keelHome(), 'config.json');
   if (fs.existsSync(globalFile)) {
     try {
-      cfg = deepMerge(cfg, JSON.parse(fs.readFileSync(globalFile, 'utf8')));
+      cfg = deepMerge(cfg, JSON.parse(fs.readFileSync(globalFile, 'utf-8')));
       sources.push(globalFile);
     } catch (e) {
       throw new Error(`解析 ${globalFile} 失败: ${(e as Error).message}`);
@@ -101,13 +107,49 @@ export function loadConfig(cwd: string = process.cwd()): LoadedConfig {
   const projectFile = path.join(cwd, '.keel.json');
   if (fs.existsSync(projectFile)) {
     try {
-      cfg = deepMerge(cfg, JSON.parse(fs.readFileSync(projectFile, 'utf8')));
+      cfg = deepMerge(cfg, JSON.parse(fs.readFileSync(projectFile, 'utf-8')));
       sources.push(projectFile);
     } catch (e) {
       throw new Error(`解析 ${projectFile} 失败: ${(e as Error).message}`);
     }
   }
+  const envApplied = applyEnvOverrides(cfg);
+  if (envApplied) sources.push('env:KEEL_MODEL');
   return { cfg, sources };
+}
+
+/**
+ * 环境变量直配（优先级最高，零配置文件）：
+ *   KEEL_MODEL=stepfun/step-5-preview          内置 provider 直接引用
+ *   KEEL_MODEL=my-model KEEL_BASE_URL=... KEEL_API_KEY=... KEEL_API=anthropic|responses|openai
+ *   KEEL_FAST_MODEL=...                         可选，压缩等辅助调用
+ */
+function applyEnvOverrides(cfg: KeelConfig): boolean {
+  const resolve = (ref: string): string | null => {
+    const v = process.env[ref]?.trim();
+    if (!v) return null;
+    const slash = v.indexOf('/');
+    const providerName = slash > 0 ? v.slice(0, slash) : '';
+    if (providerName && cfg.providers[providerName]) return v; // 内置/已配置 provider
+    // 未知 provider：挂到 env provider 上，模型名取斜杠后段（无斜杠则整串）
+    if (!cfg.providers.env) {
+      const api = (['openai', 'anthropic', 'responses'] as const).includes(process.env.KEEL_API as 'openai')
+        ? (process.env.KEEL_API as ProviderApi)
+        : 'openai';
+      cfg.providers.env = {
+        baseURL: process.env.KEEL_BASE_URL?.trim() || 'https://api.openai.com/v1',
+        apiKeyEnv: 'KEEL_API_KEY',
+        api,
+      };
+    }
+    return `env/${slash > 0 ? v.slice(slash + 1) : v}`;
+  };
+  const main = resolve('KEEL_MODEL');
+  if (main) cfg.router.main = main;
+  const fast = resolve('KEEL_FAST_MODEL');
+  if (fast) cfg.router.fast = fast;
+  else if (main) cfg.router.fast = main;
+  return Boolean(main || fast);
 }
 
 export function configTemplate(): string {
@@ -118,8 +160,8 @@ export function configTemplate(): string {
       router: { main: 'deepseek/deepseek-chat', fast: 'deepseek/deepseek-chat' },
       verify: { commands: ['npm test'] },
       _说明: {
-        providers: '内置 deepseek/zhipu/moonshot/qwen/openai；apiKeyEnv 指定从哪个环境变量读密钥',
-        router: '格式 provider/model；main 干活，fast 做上下文压缩等便宜活',
+        providers: '内置 deepseek/zhipu/glm-anthropic/stepfun/moonshot/qwen/openai；api 指定线协议(openai|anthropic|responses)；apiKeyEnv 指定从哪个环境变量读密钥',
+        router: '格式 provider/model；main 干活，fast 做上下文压缩等便宜活；也可用环境变量 KEEL_MODEL/KEEL_BASE_URL/KEEL_API_KEY/KEEL_API 直配（优先级最高）',
         llm: 'retries=瞬态错误重试次数；timeoutMs=单请求超时；stream=流式输出',
         verify: '完成契约的默认验证命令，agent 修改文件后必须跑通才能声明完成',
         policy: 'denyPaths 拦路径（读和写都拦）；constrainToWorkspace 禁止出工作目录；bashDeny 直接拒绝；bashApprove 需人工确认',
