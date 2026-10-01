@@ -113,7 +113,7 @@ export class SessionStore {
         /* 跳过损坏的会话目录 */
       }
     }
-    return out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    return out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : a.id < b.id ? 1 : -1));
   }
 
   /** 追加一条事件；seq 单调递增 */

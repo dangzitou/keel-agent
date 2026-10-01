@@ -1,6 +1,7 @@
 import readline from 'node:readline';
 import { KeelConfig, loadConfig } from './config.js';
 import { SessionStore } from './core/store.js';
+import { fold } from './core/fold.js';
 import { runUserTurn, getGitBranch } from './core/loop.js';
 import { TerminalUi, statusLine } from './ui/render.js';
 import { ansi } from './util/ansi.js';
@@ -19,7 +20,8 @@ const HELP = `命令:
   /help                 本帮助
   /new                  开新会话
   /sessions             列出历史会话
-  /replay <id>          只读回放某个会话的事件流
+  /plan                 查看当前计划（fold 自事件流）
+  /replay [id]          只读回放某个会话的事件流
   /fork <id> [seq]      从事件 seq 分叉新会话（默认到最后），并切换过去
   /cost [id]            成本报告（按模型、验证状态）
   /policy               查看当前生效策略
@@ -158,6 +160,17 @@ function handleSlash(
     case '/sessions':
       listSessions(ctx.ui);
       break;
+    case '/plan': {
+      const st = fold(ctx.store().readAll());
+      if (!st.plan?.length) {
+        ctx.ui.status('当前没有计划。让模型开始多步骤任务时会自动用 plan 工具建立。');
+        break;
+      }
+      const done = st.plan.filter((s) => s.status === 'done').length;
+      const lines = st.plan.map((s) => `  ${s.status === 'done' ? '✓' : s.status === 'in_progress' ? '▸' : '·'} ${s.text}`);
+      ctx.ui.status(`计划（${done}/${st.plan.length} 完成，fold 自事件流）\n${lines.join('\n')}`);
+      break;
+    }
     case '/replay': {
       const id = args[0] ?? ctx.store().id;
       replaySession(id, ctx.ui);

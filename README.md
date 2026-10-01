@@ -69,11 +69,12 @@ Keel is not trying to out-feature the others. It is the minimal, trustworthy har
 
 ```bash
 git clone https://github.com/dangzitou/keel-agent.git
-cd keel && npm install && npm run build
-node dist/index.js init        # writes ~/.keel/config.json
-export DEEPSEEK_API_KEY=sk-... # or ZHIPU_API_KEY / OPENAI_API_KEY / ...
-node dist/index.js             # interactive REPL
+cd keel-agent && npm install && npm run build
+export ZHIPU_API_KEY=sk-...   # or STEPFUN_API_KEY / DEEPSEEK_API_KEY / ...
+node dist/index.js            # interactive REPL — the model is auto-matched to your key
 ```
+
+No config file needed: keel picks a sensible model from whichever provider key it finds. `node dist/index.js run "task"` for one-shot mode, `continue` to resume the latest session, `-m <provider/model>` to switch models per run.
 
 No API key? The full pipeline runs on a deterministic mock model:
 
@@ -86,7 +87,8 @@ KEEL_MOCK=1 node dist/index.js run "write a hello world"
 | Command | What it does |
 |---|---|
 | `keel` | interactive REPL (`--session <id>` to continue) |
-| `keel run "<task>"` | single task; exit code 3 if `unverified`, 1 on failure |
+| `keel continue` | resume the most recent session |
+| `keel run "<task>"` | single task; exit code 3 if `unverified`, 1 on failure (`-m <ref>` switches model, `--yes` auto-approves) |
 | `keel sessions` | list sessions (turns, spend, ⚠ unverified-change marker) |
 | `keel replay <id>` | read-only replay of the event stream |
 | `keel fork <id> [--at <seq>]` | branch a new session from event `seq` |

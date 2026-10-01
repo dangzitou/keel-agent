@@ -69,11 +69,12 @@ Keel 不和别人拼功能清单。它是为 CI 与自动化准备的最小可�
 
 ```bash
 git clone https://github.com/dangzitou/keel-agent.git
-cd keel && npm install && npm run build
-node dist/index.js init          # 生成 ~/.keel/config.json
-export DEEPSEEK_API_KEY=sk-...   # 或 ZHIPU_API_KEY / OPENAI_API_KEY 等
-node dist/index.js               # 交互式 REPL
+cd keel-agent && npm install && npm run build
+export ZHIPU_API_KEY=sk-...   # 或 STEPFUN_API_KEY / DEEPSEEK_API_KEY 等
+node dist/index.js            # 交互式 REPL——模型根据你 export 的 key 自动匹配
 ```
+
+零配置文件：环境里有哪些 provider 的 key，keel 就自动选合理的默认模型。`node dist/index.js run "任务"` 单发模式、`continue` 继续最近会话、`-m <provider/model>` 临时换模型。
 
 没有 API key 也能体验完整链路（确定性 mock 模型）：
 
@@ -86,7 +87,8 @@ KEEL_MOCK=1 node dist/index.js run "写个 hello"
 | 命令 | 作用 |
 |---|---|
 | `keel` | 交互式 REPL（`--session <id>` 继续会话） |
-| `keel run "<任务>"` | 单任务模式；`unverified` 时退出码 3，失败退出码 1 |
+| `keel continue` | 继续最近一个会话 |
+| `keel run "<任务>"` | 单任务模式；`unverified` 时退出码 3，失败退出码 1（`-m <ref>` 换模型，`--yes` 自动放行审批） |
 | `keel sessions` | 列出会话（回合数、花费、⚠未验证修改标记） |
 | `keel replay <id>` | 只读回放事件流 |
 | `keel fork <id> [--at <seq>]` | 从第 seq 个事件分叉新会话 |

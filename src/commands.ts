@@ -7,6 +7,15 @@ import { renderEventLine, Ui } from './ui/render.js';
 import { hasKnownPrice } from './llm/cost.js';
 import { loadConfig } from './config.js';
 
+/** 最近一个会话的 id（keel continue / replay / cost 省略参数时用） */
+export function latestSessionId(): string {
+  const metas = SessionStore.list();
+  if (!metas.length) {
+    throw new Error('还没有任何会话。先用 keel run "任务" 或交互模式开一个。');
+  }
+  return metas[0]!.id;
+}
+
 export function listSessions(ui: Ui): void {
   const metas = SessionStore.list();
   if (!metas.length) {

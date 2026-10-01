@@ -118,6 +118,30 @@ export function loadConfig(cwd: string = process.cwd()): LoadedConfig {
   return { cfg, sources };
 }
 
+/** 各内置 provider 的代表模型：自动选择默认模型时用（同一 env key 只取最靠前的 openai 兼容项） */
+const AUTO_MODEL: Array<[provider: string, model: string]> = [
+  ['zhipu', 'zhipu/glm-4.6'],
+  ['glm-anthropic', 'glm-anthropic/glm-5.3'],
+  ['stepfun', 'stepfun/step-5-preview'],
+  ['moonshot', 'moonshot/kimi-k2-0711-preview'],
+  ['qwen', 'qwen/qwen-plus'],
+  ['openai', 'openai/gpt-4o-mini'],
+];
+
+/**
+ * 易用性默认值：router 仍是出厂默认（deepseek）且其 key 不在时，
+ * 自动切到环境里有 key 的内置 provider（多个在场时按上表优先级取第一个）——
+ * "export 一个 key 即可用"。
+ */
+export function autoModelFromEnv(providers: Record<string, ProviderCfg>, defaultMain: string): string | null {
+  if (defaultMain.split('/')[0] === 'deepseek' && process.env.DEEPSEEK_API_KEY) return null;
+  for (const [name, model] of AUTO_MODEL) {
+    const pcfg = providers[name];
+    if (pcfg && process.env[pcfg.apiKeyEnv]) return model;
+  }
+  return null;
+}
+
 /**
  * 环境变量直配（优先级最高，零配置文件）：
  *   KEEL_MODEL=stepfun/step-5-preview          内置 provider 直接引用
@@ -149,7 +173,15 @@ function applyEnvOverrides(cfg: KeelConfig): boolean {
   const fast = resolve('KEEL_FAST_MODEL');
   if (fast) cfg.router.fast = fast;
   else if (main) cfg.router.fast = main;
-  return Boolean(main || fast);
+  if (!main && !fast) {
+    const auto = autoModelFromEnv(cfg.providers, cfg.router.main);
+    if (auto) {
+      cfg.router.main = auto;
+      cfg.router.fast = auto;
+    }
+    return Boolean(auto);
+  }
+  return true;
 }
 
 export function configTemplate(): string {

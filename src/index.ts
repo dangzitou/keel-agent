@@ -6,36 +6,38 @@ import { loadConfig, initConfig } from './config.js';
 import { runUserTurn, getGitBranch } from './core/loop.js';
 import { SessionStore } from './core/store.js';
 import { TerminalUi, statusLine } from './ui/render.js';
-import { listSessions, replaySession, forkSession, costReport, doctor } from './commands.js';
+import { listSessions, replaySession, forkSession, costReport, doctor, latestSessionId } from './commands.js';
 import { startRepl } from './repl.js';
 
 const USAGE = `keel（龙骨）— 可回放、可验证、可审计的编码智能体 CLI
 
 用法:
   keel                          交互式会话（--session <id> 继续指定会话）
+  keel continue                 继续最近一个会话
   keel run "<任务描述>"          单任务模式：完成后退出（--yes 自动放行敏感操作审批）
   keel sessions                 列出所有会话（含花费与验证状态）
-  keel replay <id>              只读回放一个会话的完整事件流
+  keel replay [id]              只读回放事件流（省略 id = 最近会话）
   keel fork <id> [--at <seq>]   从第 seq 个事件分叉出新会话（默认到最后）
-  keel cost <id>                会话成本报告（按模型/回合/验证状态）
+  keel cost [id]                成本报告（省略 id = 最近会话）
   keel doctor                   环境体检：配置/密钥/价目/验证命令
-  keel init                     生成 ~/.keel/config.json 配置模板
+  keel init                     生成 ~/.keel/config.json 配置模板（可选，默认值开箱即用）
 
 常用选项:
-  --cwd <dir>     项目目录（默认当前目录）
-  --session <id>  继续已有会话
-  --at <seq>      fork 的事件断点
-  -v, --version   版本
+  -m, --model <ref>   本次运行的模型（如 glm-anthropic/glm-5.3，覆盖配置）
+  --cwd <dir>         项目目录（默认当前目录）
+  --session <id>      继续已有会话
+  --at <seq>          fork 的事件断点
+  -v, --version       版本
 
 退出码（keel run）: 0=done 1=失败/预算/超轮次 2=参数错误 3=存在未验证修改 130=被中断
 
-快速开始:
-  1. keel init && keel doctor
-  2. export DEEPSEEK_API_KEY=...   （或 ZHIPU_API_KEY / OPENAI_API_KEY 等）
-  3. 项目里放一个 .keel.json 配置 verify.commands，如 ["npm test"]
-  4. keel run "修复 xxx 并确保测试通过"
+快速开始（免配置，export 一个 key 即用）:
+  1. export ZHIPU_API_KEY=...        （或 STEPFUN_API_KEY / DEEPSEEK_API_KEY 等，模型自动匹配）
+  2. keel run "修复 xxx 并确保测试通过"
+  3. 想换模型: keel run -m stepfun/step-5-preview "..."
 
-无 API key 也可体验：KEEL_MOCK=1 keel run "写个 hello"`;
+  项目里放 .keel.json 配置 verify.commands（如 ["npm test"]）可启用完成契约的门禁。
+  无 API key 也可体验：KEEL_MOCK=1 keel run "写个 hello"`;
 
 function version(): string {
   try {
@@ -51,6 +53,7 @@ interface Flags {
   session?: string;
   at?: number;
   yes: boolean;
+  model?: string;
 }
 
 function parseArgs(argv: string[]): { flags: Flags; positional: string[] } {
@@ -62,6 +65,7 @@ function parseArgs(argv: string[]): { flags: Flags; positional: string[] } {
     else if (a === '--session') flags.session = argv[++i];
     else if (a === '--at') flags.at = Number(argv[++i]);
     else if (a === '--yes') flags.yes = true;
+    else if (a === '-m' || a === '--model') flags.model = argv[++i];
     else positional.push(a);
   }
   return { flags, positional };
@@ -74,6 +78,7 @@ async function main(): Promise<void> {
     return;
   }
   const { flags, positional } = parseArgs(argv);
+  if (flags.model) process.env.KEEL_MODEL = flags.model; // 复用环境变量直配链路
   const cmd = positional.shift() ?? 'chat';
   const ui = new TerminalUi();
 
@@ -82,6 +87,11 @@ async function main(): Promise<void> {
       case 'chat':
       case 'repl': {
         await startRepl({ cwd: flags.cwd, sessionId: flags.session });
+        break;
+      }
+      case 'continue':
+      case 'c': {
+        await startRepl({ cwd: flags.cwd, sessionId: flags.session ?? latestSessionId() });
         break;
       }
       case 'run': {
@@ -138,7 +148,7 @@ async function main(): Promise<void> {
         listSessions(ui);
         break;
       case 'replay':
-        replaySession(requireArg(positional.shift(), 'replay <sessionId>'), ui);
+        replaySession(positional.shift() ?? latestSessionId(), ui);
         break;
       case 'fork': {
         const id = requireArg(positional.shift(), 'fork <sessionId> [--at seq]');
@@ -149,7 +159,7 @@ async function main(): Promise<void> {
         break;
       }
       case 'cost':
-        costReport(requireArg(positional.shift(), 'cost <sessionId>'), ui);
+        costReport(positional.shift() ?? latestSessionId(), ui);
         break;
       case 'doctor': {
         const { checks, ok } = doctor();
