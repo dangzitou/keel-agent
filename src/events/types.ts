@@ -13,6 +13,7 @@ export type EventName =
   | 'llm.retry'
   | 'tool.call'
   | 'tool.result'
+  | 'plan.updated'
   | 'policy.decision'
   | 'verify.started'
   | 'verify.result'
@@ -111,6 +112,18 @@ export interface ToolResultData {
   ok: boolean;
   output: string;
   durationMs: number;
+}
+
+export type PlanStatus = 'pending' | 'in_progress' | 'done';
+
+export interface PlanStep {
+  text: string;
+  status: PlanStatus;
+}
+
+/** 计划即事件：快照式全量替换，落在事件流里可回放、可审计、fork 后可改计划重走 */
+export interface PlanUpdatedData {
+  steps: PlanStep[];
 }
 
 export interface VerifyStartedData {

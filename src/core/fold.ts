@@ -1,4 +1,4 @@
-import { Event } from '../events/types.js';
+import { Event, PlanStep } from '../events/types.js';
 import { ChatMessage } from '../llm/types.js';
 
 export interface ModelSpend {
@@ -28,6 +28,8 @@ export interface FoldState {
   compactUpToSeq: number;
   filesTouched: string[];
   title: string;
+  /** 当前计划（最后一次 plan.updated 的快照；fork 回溯后自动回到当时的计划） */
+  plan: PlanStep[] | null;
 }
 
 const FILE_MOD_TOOLS = new Set(['write', 'edit']);
@@ -51,6 +53,7 @@ export function fold(events: Event[]): FoldState {
     compactUpToSeq: 0,
     filesTouched: [],
     title: '',
+    plan: null,
   };
 
   // 先收集 tool 结果，文件修改只在对应 tool.result ok 时计入
@@ -105,6 +108,10 @@ export function fold(events: Event[]): FoldState {
           const p = e.data.input?.path;
           if (typeof p === 'string') st.filesTouched.push(p);
         }
+        break;
+      }
+      case 'plan.updated': {
+        st.plan = e.data.steps as PlanStep[];
         break;
       }
       case 'verify.result': {

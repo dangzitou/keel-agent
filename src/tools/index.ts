@@ -2,11 +2,12 @@ import { SessionStore } from '../core/store.js';
 import { ToolCall, ToolSchema } from '../llm/types.js';
 import { bashTool, editTool, globTool, grepTool, readTool, writeTool } from './builtin.js';
 import { verifyTool } from './verify.js';
+import { planTool } from './plan.js';
 import { ToolCtx, ToolDef, ToolOutput } from './types.js';
 
 export type { ToolCtx, ToolDef, ToolOutput } from './types.js';
 
-const registry: ToolDef[] = [readTool, writeTool, editTool, bashTool, globTool, grepTool, verifyTool];
+const registry: ToolDef[] = [planTool, readTool, writeTool, editTool, bashTool, globTool, grepTool, verifyTool];
 
 export const TOOLS: Map<string, ToolDef> = new Map(registry.map((t) => [t.name, t]));
 

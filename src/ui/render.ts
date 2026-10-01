@@ -204,6 +204,12 @@ export function renderEventLine(e: Event): string {
       const first = String(d.output ?? '').split('\n').slice(0, 3).join(' ⏎ ');
       return `${d.ok ? ansi.dim('  ↳') : ansi.red('  ✗')} ${ansi.dim(`${d.tool} · ${d.durationMs}ms · ${first.slice(0, 200)}`)}`;
     }
+    case 'plan.updated': {
+      const steps = (d.steps ?? []) as { text: string; status: 'pending' | 'in_progress' | 'done' }[];
+      const done = steps.filter((s) => s.status === 'done').length;
+      const mark = (s: { status: string }) => (s.status === 'done' ? '✓' : s.status === 'in_progress' ? '▸' : '·');
+      return ansi.cyan(`☰ 计划（${done}/${steps.length}）\n${steps.map((s) => `  ${mark(s)} ${s.text}`).join('\n')}`);
+    }
     case 'verify.started':
       return ansi.dim(`⧗ 验证: ${(d.commands ?? []).join(' && ')}`);
     case 'verify.result':
