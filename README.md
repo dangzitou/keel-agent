@@ -1,113 +1,107 @@
-# Keel（龙骨）
+<div align="center">
 
-**可回放、可验证、可审计的编码智能体 CLI。** 运行时零依赖，OpenAI 兼容接口通吃 DeepSeek / GLM / Kimi / Qwen / OpenAI。支持流式输出、瞬态错误自动重试、Ctrl+C 安全中断。
+# Keel
 
-```
-keel run "修复登录超时的 bug，并确保测试通过"
-```
+**A replayable, verifiable, auditable coding agent CLI.**
 
-## 它和 Claude Code / DSH / Cline 的区别在哪
+Event-sourced sessions · Evidence-driven completion · Zero runtime dependencies
 
-到 2026 年，agent CLI 的功能清单已经同质化：工具循环、MCP、hooks、插件、子代理家家都有。Keel 不在清单上竞争，而是改 harness 的三个核心行为：
+**English** · [中文文档](./README.zh-CN.md)
 
-### 1. 会话即事件流（event-sourced session）
+![License](https://img.shields.io/badge/license-MIT-4C8DFF?style=flat)
+![Node](https://img.shields.io/badge/node-%E2%89%A518.17-4C8DFF?style=flat)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-4C8DFF?style=flat)
+![Runtime deps](https://img.shields.io/badge/runtime%20deps-0-4C8DFF?style=flat)
 
-传统 agent 把对话存成消息数组，"恢复会话"只是续上数组。Keel 的会话是一条 **append-only 事件流**（`~/.keel/sessions/<id>/events.jsonl`），LLM 请求/响应、策略判定、工具调用、验证证据、上下文压缩全部是带序号的事件；对话历史、花费、验证状态全部是对事件的 **fold（纯推导）**。
+</div>
 
-由此获得别家没有的能力：
+---
 
-- **`keel fork <id> --at <seq>`**：从任意事件分叉出新会话——"如果它当时没删那个文件会怎样"是可操作的
-- **`keel replay <id>`**：只读回放完整执行轨迹（含每步策略判定与成本）
-- **`keel cost <id>`**：按模型/回合的费用审计，精确到每次 LLM 调用
-- **上下文压缩只是视图替换**：事件流里永远有全量历史，fork 回压缩点即可还原——不像传统 compact，压完细节就永久丢失了
-
-### 2. 证据驱动的完成契约（evidence-driven done）
-
-别的 agent 说"完成"是模型自述。Keel 由 **harness 强制**：只要发生过文件修改（write/edit），模型声明完成前必须调用 `verify` 工具跑通验证（测试/构建/脚本），证据落盘 `evidence/` 目录；没验证就想收工会被打回（最多 2 次），最终仍无证据则以 `unverified` 结束并给出非零退出码——CI 里可以直接依赖这个信号。
-
-### 3. 策略先行、全程审计
-
-所有工具调用先过声明式策略引擎再执行，判定本身也作为事件落盘：
-
-- `denyPaths`：路径黑名单（默认 `.env`、私钥），**读和写都拦**
-- `bashDeny` / `bashApprove`：命令直接拒绝 / 需人工确认
-- `readOnly`：只读模式
-- 预算熔断：会话花费超上限自动停
-
-## 快速开始
+Keel is a coding agent harness that treats the **session as an append-only event log** and **"done" as a verifiable contract**. It runs on any OpenAI-compatible endpoint — DeepSeek, GLM, Kimi, Qwen, OpenAI — installs with zero runtime dependencies, and exits with status codes your CI can rely on.
 
 ```bash
-npm install && npm run build
-node dist/index.js init          # 生成 ~/.keel/config.json
-export DEEPSEEK_API_KEY=sk-...   # 或 ZHIPU_API_KEY / OPENAI_API_KEY 等
-node dist/index.js               # 交互式 REPL
+keel run "fix the login timeout bug and make the tests pass"
 ```
 
-没有 API key 也能体验完整链路（确定性 mock 模型）：
+## Why another agent CLI
+
+By 2026 every agent CLI has the same feature list: tool loops, MCP, hooks, plugins, subagents. Keel does not compete on that list. It changes three core behaviors of the harness itself.
+
+### 1. The session is an event stream
+
+Traditional agents store conversations as a message array; "resume" just appends to it. A Keel session is an **append-only event stream** (`~/.keel/sessions/<id>/events.jsonl`): every LLM request/response, policy decision, tool call, verification result and context compaction is a numbered event. Message history, spend and verification state are **pure folds over events** — never a second source of truth.
+
+That buys capabilities the message-array model cannot express:
+
+- `keel fork <id> --at <seq>` — branch a new session from **any past event**: "what if it hadn't deleted that file" becomes a runnable experiment
+- `keel replay <id>` — read-only replay of the full execution trace, including every policy decision and its cost
+- `keel cost <id>` — spend audit per model and per turn, down to individual LLM calls
+- **Compaction is a view swap**: the event stream always keeps full history; fork back to the compaction point to restore what a traditional `/compact` discards forever
+
+### 2. "Done" requires evidence
+
+For other agents, "done" is the model's word. Keel enforces it in the harness: if any file was modified (write/edit), the model must pass the `verify` tool — tests, build, scripts — before it may declare completion. Evidence lands in the `evidence/` directory. Unverified wrap-ups get bounced (up to 2 times); if evidence never arrives, the session ends as `unverified` with a **non-zero exit code** that CI can branch on directly.
+
+### 3. Policy first, audit everything
+
+Every tool call passes a declarative policy engine before execution, and the decision itself is logged as an event:
+
+- `denyPaths` — path blocklist (defaults: `.env`, private keys), enforced on **reads and writes**
+- `bashDeny` / `bashApprove` — reject outright / require human approval
+- `readOnly` — read-only sessions
+- Budget fuse — the session halts automatically when spend exceeds the cap
+
+## How Keel compares
+
+| | Keel | Claude Code | Codex CLI | Apache Maka |
+|---|---|---|---|---|
+| Session model | append-only event log, state = fold | message array + checkpoint rewind | rollout records | RuntimeEvent log + projections |
+| Fork at any event | ✅ `fork --at <seq>` | rewind only (discards the future) | — | resume only |
+| Compaction reversible | ✅ view swap, history kept | ✗ detail lost after `/compact` | ✗ after auto-compact | ✅ leaves prompt, not log |
+| Machine-checkable "done" | ✅ verify gate + exit codes | ✗ | ✗ | ✗ (eval measures the harness) |
+| Models | any OpenAI-compatible endpoint | Anthropic | OpenAI ecosystem | bring your own |
+| Runtime dependencies | **0** | — | — | large workspace app |
+
+Keel is not trying to out-feature the others. It is the minimal, trustworthy harness for CI and automation: forkable like git, accountable like a ledger, and honest about completion.
+
+## Quick start
 
 ```bash
-KEEL_MOCK=1 node dist/index.js run "写个 hello"
+git clone https://github.com/dangzitou/keel.git
+cd keel && npm install && npm run build
+node dist/index.js init        # writes ~/.keel/config.json
+export DEEPSEEK_API_KEY=sk-... # or ZHIPU_API_KEY / OPENAI_API_KEY / ...
+node dist/index.js             # interactive REPL
 ```
 
-项目级配置 `.keel.json`（放在仓库根目录，覆盖全局配置）：
+No API key? The full pipeline runs on a deterministic mock model:
 
-```json
-{
-  "verify": { "commands": ["npm test"] },
-  "router": { "main": "deepseek/deepseek-chat", "fast": "deepseek/deepseek-chat" },
-  "budget": { "maxUsdPerSession": 2 }
-}
+```bash
+KEEL_MOCK=1 node dist/index.js run "write a hello world"
 ```
-
-`router.main` 干活，`router.fast` 做上下文压缩等便宜活——路由是一等公民，多模型是调度而非"支持"。
 
 ## CLI
 
-| 命令 | 作用 |
+| Command | What it does |
 |---|---|
-| `keel` | 交互式 REPL（`--session <id>` 继续会话） |
-| `keel run "<任务>"` | 单任务模式；`unverified` 时退出码 3，失败退出码 1 |
-| `keel sessions` | 列出会话（回合数、花费、⚠未验证修改标记） |
-| `keel replay <id>` | 只读回放事件流 |
-| `keel fork <id> [--at <seq>]` | 从第 seq 个事件分叉新会话 |
-| `keel cost <id>` | 成本报告 |
-| `keel doctor` | 环境体检：node 版本、配置、密钥、价目、验证命令、目录可写性 |
-| `keel init` | 生成配置模板 |
+| `keel` | interactive REPL (`--session <id>` to continue) |
+| `keel run "<task>"` | single task; exit code 3 if `unverified`, 1 on failure |
+| `keel sessions` | list sessions (turns, spend, ⚠ unverified-change marker) |
+| `keel replay <id>` | read-only replay of the event stream |
+| `keel fork <id> [--at <seq>]` | branch a new session from event `seq` |
+| `keel cost <id>` | cost report |
+| `keel doctor` | environment check: node, config, keys, pricing, verify commands, writable dirs |
+| `keel init` | write a config template |
 
-REPL 内命令：`/help /new /sessions /replay /fork /cost /policy /exit`。
+REPL slash commands: `/help /new /sessions /replay /fork /cost /policy /exit`.
 
-**可靠性设计**：LLM 调用对 429/5xx/网络错误做指数退避重试（`llm.retries`，尊重 `Retry-After`），单请求超时可配（`llm.timeoutMs`）；每次重试落 `llm.retry` 事件可审计。Ctrl+C 触发 AbortSignal 全程传导——进行中的 fetch 与 bash 进程组被终止，`turn.completed(aborted)` 完整落盘，`keel run` 以退出码 130 结束。回合进行中在 REPL 输入的文本会排队，不丢弃。
+**Exit codes** (for CI): `0` done · `1` failure / budget / max turns · `3` unverified file changes · `130` interrupted.
 
-## 架构
+**Reliability**: exponential backoff on 429/5xx/network errors (`llm.retries`, honors `Retry-After`), configurable per-request timeout; every retry lands as an auditable `llm.retry` event. Ctrl+C propagates an AbortSignal end-to-end — in-flight fetches and the bash process group are terminated, `turn.completed(aborted)` is persisted, and `keel run` exits 130. Text typed mid-turn in the REPL is queued, not dropped.
 
-```
-src/
-├── events/types.ts     # 14 种事件类型（版本化 schema）
-├── core/
-│   ├── store.ts        # append-only JSONL 存储（~/.keel/sessions/<id>/）
-│   ├── fold.ts         # 状态 = fold(事件)：消息/花费/验证状态/文件改动
-│   └── loop.ts         # agent 循环：完成契约、预算熔断、上下文压缩
-├── llm/
-│   ├── provider.ts     # OpenAI 兼容客户端 + 确定性 mock
-│   ├── router.ts       # main/fast 角色路由
-│   └── cost.ts         # 价目表与计费
-├── policy/policy.ts    # 声明式策略引擎（deny/approve/allow）
-├── tools/              # read/write/edit/bash/glob/grep/verify
-├── ui/render.ts        # 终端渲染 + 事件回放渲染
-└── index.ts / repl.ts / commands.ts
-```
+## Configuration
 
-**事件 schema**（信封 `seq / id / ts / session / parent / forkedAtSeq / type / data`，15 种 type：`session.started`、`user.message`、`system.note`、`llm.request`、`llm.response`、`llm.retry`、`tool.call`、`tool.result`、`policy.decision`、`verify.started`、`verify.result`、`context.compacted`、`turn.completed`、`budget.exceeded`、`error`）。
-
-关键设计约束：
-
-- 事件只追加、不改写；fork 是复制前缀，不是改历史
-- 任何状态都可从事件重放推导，所以重放本身就是回归测试
-- harness 的不变量（完成契约、策略、预算）在 loop 层强制，不依赖提示词自觉
-
-## 配置参考
-
-全局 `~/.keel/config.json` 与项目 `.keel.json` 合并（项目优先）：
+Global `~/.keel/config.json` merged with project `.keel.json` (project wins):
 
 ```jsonc
 {
@@ -127,33 +121,69 @@ src/
 }
 ```
 
-API key 只从环境变量读取（`providers.<name>.apiKeyEnv` 指定变量名），不落配置文件。
+`router.main` does the work; `router.fast` handles compaction and other cheap tasks — routing is a first-class concern, multi-model is scheduling, not a checkbox. API keys are read **only** from environment variables (`providers.<name>.apiKeyEnv` names the variable); they never touch a config file.
 
-## 安全边界（务必阅读）
+## Architecture
 
-Keel 是策略层 + 审计层，**不是操作系统级沙箱**：
-
-- `constrainToWorkspace`（默认开）只约束 read/write/edit/glob/grep；**bash 不受路径约束**——`cat /etc/passwd` 这类命令绕过路径策略，依赖 `bashDeny`/`bashApprove` 与人工审批
-- `bashDeny`/`bashApprove` 是朴素模式匹配，可被引号/变量绕过，是最低保障而非安全边界
-- 需要强隔离时，请把 keel 放进容器/VM 运行（roadmap：内置 worktree/容器隔离）
-- 事件流会记录工具输入（含 write 的完整文件内容），敏感仓库注意会话目录的访问权限与留存策略
-- 模型可能被仓库内容注入指令：完成契约与策略层是兜底，高危操作请保持审批开启
-
-**平台**：macOS / Linux（bash 依赖）。`keel run` 退出码约定：`0` done、`1` 失败/预算/超轮次、`3` 存在未验证修改、`130` 被中断——CI 可直接按退出码分派。
-
-## 测试与 CI
-
-```bash
-npm test    # 30 个用例：glob/策略(含目录约束)/fold/fork/重试/流式聚合 + mock 全链路（契约打回、预算熔断、策略拦截）
-            # + 本地 SSE 服务器集成测试（chatStream 消费真实流式分片、agent loop 全链路走真实 SSE）
-            # + 真实 SIGINT 投递测试（keel run 子进程 exit 130 + aborted 事件落盘）
+```text
+src/
+├── events/types.ts     # 14 event types (versioned schema)
+├── core/
+│   ├── store.ts        # append-only JSONL store (~/.keel/sessions/<id>/)
+│   ├── fold.ts         # state = fold(events): messages / spend / verification / file changes
+│   └── loop.ts         # agent loop: completion contract, budget fuse, compaction
+├── llm/
+│   ├── provider.ts     # OpenAI-compatible client + deterministic mock
+│   ├── router.ts       # main/fast role routing
+│   └── cost.ts         # pricing tables and billing
+├── policy/policy.ts    # declarative policy engine (deny / approve / allow)
+├── tools/              # read / write / edit / bash / glob / grep / verify
+├── ui/render.ts        # terminal rendering + event replay rendering
+└── index.ts / repl.ts / commands.ts
 ```
 
-GitHub Actions（`.github/workflows/ci.yml`）在 Node 20/22 上跑 build + test + mock 模式端到端 smoke。
+Event envelope: `seq / id / ts / session / parent / forkedAtSeq / type / data`, with 15 types: `session.started`, `user.message`, `system.note`, `llm.request`, `llm.response`, `llm.retry`, `tool.call`, `tool.result`, `policy.decision`, `verify.started`, `verify.result`, `context.compacted`, `turn.completed`, `budget.exceeded`, `error`.
+
+Invariants:
+
+- events are append-only; fork copies a prefix, it never rewrites history
+- any state can be re-derived by replay, so a replay *is* a regression test
+- harness invariants (completion contract, policy, budget) are enforced in the loop layer, not delegated to prompt discipline
+
+## Security boundaries — read this
+
+Keel is a policy and audit layer, **not an OS-level sandbox**:
+
+- `constrainToWorkspace` (default on) constrains read/write/edit/glob/grep only — **bash is not path-constrained**; `cat /etc/passwd` bypasses path policy and relies on `bashDeny`/`bashApprove` and human approval
+- `bashDeny`/`bashApprove` is naive pattern matching; it can be bypassed with quoting or variables. Treat it as a guardrail, not a boundary
+- For strong isolation, run keel inside a container/VM (built-in worktree/container isolation is on the roadmap)
+- The event stream records tool inputs, including full file contents written by `write` — mind access permissions and retention for sensitive repos
+- Models can be prompt-injected by repo content: the completion contract and policy layer are backstops; keep approvals on for high-risk operations
+
+Platforms: macOS / Linux (bash required).
+
+## Testing & CI
+
+```bash
+npm test   # 30 cases: glob / policy (incl. workspace constraints) / fold / fork / retry / stream aggregation
+           # + full mock pipeline (contract bounce-back, budget fuse, policy interception)
+           # + local SSE server integration test (real streaming chunks through the agent loop)
+           # + real SIGINT delivery test (keel run child exits 130, aborted event persisted)
+```
+
+GitHub Actions runs build + tests + a mock-mode end-to-end smoke on Node 20/22.
 
 ## Roadmap
 
-- what-if 分叉：替换某个工具结果后重跑（fork 的完全体）
-- worktree/容器隔离：planner-worker 多任务隔离执行，产出分支/PR；bash 的强沙箱
-- 会话回归集：把历史会话导出为评测用例（`exportEvents` 已留口）
-- 子代理、MCP 兼容层、Windows 支持
+- What-if forks: swap a tool result and re-run — the full realization of `fork`
+- Worktree / container isolation: planner-worker execution with branch/PR output; a hard sandbox for bash
+- Session regression sets: export past sessions as eval cases (`exportEvents` hook already reserved)
+- Subagents, an MCP compatibility layer, Windows support
+
+## Status
+
+Experimental (v0.2.x). Developed in the open; the event schema, CLI and config are stable enough to try but may still change. Keel is a personal project exploring how far an agent harness can go on event sourcing alone — issues and discussions are welcome.
+
+## License
+
+[MIT](./LICENSE) © 2026 dangzitou
