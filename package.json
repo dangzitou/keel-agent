@@ -1,7 +1,7 @@
 {
   "name": "keel-agent",
   "version": "0.2.0",
-  "description": "Keel 龙骨 —— 可回放、可验证、可审计的编码智能体 CLI（event-sourced, evidence-driven coding agent）",
+  "description": "Keel Agent（龙骨）—— 可回放、可验证、可审计的编码智能体 CLI（event-sourced, evidence-driven coding agent）",
   "type": "module",
   "bin": {
     "keel": "dist/index.js"

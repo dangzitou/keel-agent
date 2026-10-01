@@ -1,6 +1,6 @@
 <div align="center">
 
-# Keel（龙骨）
+# Keel Agent（龙骨）
 
 **可回放、可验证、可审计的编码智能体 CLI。**
 
@@ -67,7 +67,7 @@ Keel 不和别人拼功能清单。它是为 CI 与自动化准备的最小可�
 ## 快速开始
 
 ```bash
-git clone https://github.com/dangzitou/keel.git
+git clone https://github.com/dangzitou/keel-agent.git
 cd keel && npm install && npm run build
 node dist/index.js init          # 生成 ~/.keel/config.json
 export DEEPSEEK_API_KEY=sk-...   # 或 ZHIPU_API_KEY / OPENAI_API_KEY 等

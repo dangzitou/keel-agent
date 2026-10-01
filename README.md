@@ -1,6 +1,6 @@
 <div align="center">
 
-# Keel
+# Keel Agent
 
 **A replayable, verifiable, auditable coding agent CLI.**
 
@@ -67,7 +67,7 @@ Keel is not trying to out-feature the others. It is the minimal, trustworthy har
 ## Quick start
 
 ```bash
-git clone https://github.com/dangzitou/keel.git
+git clone https://github.com/dangzitou/keel-agent.git
 cd keel && npm install && npm run build
 node dist/index.js init        # writes ~/.keel/config.json
 export DEEPSEEK_API_KEY=sk-... # or ZHIPU_API_KEY / OPENAI_API_KEY / ...
