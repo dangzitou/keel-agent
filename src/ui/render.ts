@@ -44,17 +44,38 @@ export class TerminalUi implements Ui {
   private timer: NodeJS.Timeout | null = null;
   private frame = 0;
   private streamedAny = false;
+  private suppressAssistantEcho = false;
+  private streamLineOpen = false;
+
+  constructor(
+    private readonly writeDelta: (text: string) => void = (text) => process.stdout.write(text),
+  ) {}
+
+  private closeStreamLine(): void {
+    if (!this.streamLineOpen) return;
+    this.streamLineOpen = false;
+    console.log();
+  }
+
+  private interruptStream(): void {
+    if (!this.streamedAny) return;
+    this.streamedAny = false;
+    this.suppressAssistantEcho = true;
+    this.closeStreamLine();
+  }
 
   assistantDelta(text: string): void {
     if (!text) return;
     this.streamedAny = true;
-    process.stdout.write(text);
+    this.streamLineOpen = !text.endsWith('\n');
+    this.writeDelta(text);
   }
 
   assistantText(text: string | null): void {
-    if (this.streamedAny) {
+    if (this.streamedAny || this.suppressAssistantEcho) {
       this.streamedAny = false;
-      if (text !== null) console.log();
+      this.suppressAssistantEcho = false;
+      this.closeStreamLine();
       return;
     }
     if (text?.trim()) console.log(text.trim());
@@ -62,6 +83,7 @@ export class TerminalUi implements Ui {
 
   toolStart(name: string, input: Record<string, unknown>): void {
     this.spinStop();
+    this.interruptStream();
     console.log(`${ansi.cyan('●')} ${ansi.bold(name)} ${ansi.dim(argHint(name, input).split('\n')[0]!.slice(0, 160))}`);
   }
 
@@ -76,26 +98,33 @@ export class TerminalUi implements Ui {
 
   note(text: string): void {
     this.spinStop();
+    this.interruptStream();
     console.log(ansi.dim(`· ${text}`));
   }
 
   warn(text: string): void {
     this.spinStop();
+    this.interruptStream();
     console.log(ansi.yellow(`! ${text}`));
   }
 
   error(text: string): void {
     this.spinStop();
+    this.interruptStream();
     console.log(ansi.red(`✗ ${text}`));
   }
 
   policyDenied(tool: string, rule: string | null): void {
     this.spinStop();
+    this.interruptStream();
     console.log(ansi.red(`⊘ ${tool} 被策略拦截${rule ? `（${rule}）` : ''}`));
   }
 
   spinStart(label: string): void {
     this.spinStop();
+    this.closeStreamLine();
+    this.streamedAny = false;
+    this.suppressAssistantEcho = false;
     if (!process.stderr.isTTY) return;
     this.frame = 0;
     this.timer = setInterval(() => {
