@@ -11,6 +11,7 @@ export const PRICE_PER_MTOK: Record<string, { input: number; output: number }> =
   'qwen-turbo': { input: 0.05, output: 0.2 },
   'kimi-k2-0711-preview': { input: 0.6, output: 2.5 },
   'kimi-k2-turbo-preview': { input: 1.15, output: 8 },
+  'step-5-preview': { input: 1, output: 2.7 },
   'gpt-4o': { input: 2.5, output: 10 },
   'gpt-4o-mini': { input: 0.15, output: 0.6 },
   'gpt-4.1-mini': { input: 0.4, output: 1.6 },
