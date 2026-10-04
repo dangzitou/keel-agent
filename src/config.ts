@@ -156,13 +156,18 @@ function applyEnvOverrides(cfg: KeelConfig): boolean {
     const slash = v.indexOf('/');
     const providerName = slash > 0 ? v.slice(0, slash) : '';
     if (providerName && cfg.providers[providerName]) return v; // 内置/已配置 provider
-    // 未知 provider：挂到 env provider 上，模型名取斜杠后段（无斜杠则整串）
+    // Keep an explicit provider prefix intact so Router can reject a typo instead of using the generic endpoint.
+    if (providerName && providerName !== 'env') return v;
+    const baseURL = process.env.KEEL_BASE_URL?.trim();
+    const apiKey = process.env.KEEL_API_KEY?.trim();
+    if (!baseURL && !apiKey) return v;
+    // Bare model names and explicit env/model may use the generic endpoint when configured.
     if (!cfg.providers.env) {
       const api = (['openai', 'anthropic', 'responses'] as const).includes(process.env.KEEL_API as 'openai')
         ? (process.env.KEEL_API as ProviderApi)
         : 'openai';
       cfg.providers.env = {
-        baseURL: process.env.KEEL_BASE_URL?.trim() || 'https://api.openai.com/v1',
+        baseURL: baseURL || 'https://api.openai.com/v1',
         apiKeyEnv: 'KEEL_API_KEY',
         api,
       };
