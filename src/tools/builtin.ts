@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { ToolCtx, ToolDef, ToolOutput } from './types.js';
 
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', '.keel', '__pycache__', '.venv', 'venv', '.next']);
@@ -156,15 +157,28 @@ export const bashTool: ToolDef = {
       const child = spawn('/bin/bash', ['-c', command], { cwd: ctx.cwd, env: process.env, detached: true });
       let out = '';
       let capped = false;
-      const collect = (chunk: Buffer) => {
+      const stdoutDecoder = new StringDecoder('utf8');
+      const stderrDecoder = new StringDecoder('utf8');
+      const collect = (decoder: StringDecoder) => (chunk: Buffer) => {
         if (out.length >= 200_000) {
           capped = true;
           return;
         }
-        out += chunk.toString();
+        out += decoder.write(chunk);
       };
-      child.stdout.on('data', collect);
-      child.stderr.on('data', collect);
+      const flush = (decoder: StringDecoder) => {
+        const tail = decoder.end();
+        if (!tail) return;
+        if (out.length >= 200_000) {
+          capped = true;
+          return;
+        }
+        out += tail;
+      };
+      child.stdout.on('data', collect(stdoutDecoder));
+      child.stderr.on('data', collect(stderrDecoder));
+      child.stdout.on('end', () => flush(stdoutDecoder));
+      child.stderr.on('end', () => flush(stderrDecoder));
       const killTree = () => {
         try {
           if (child.pid) process.kill(-child.pid, 'SIGKILL');
