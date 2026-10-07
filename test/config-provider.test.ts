@@ -57,3 +57,27 @@ test('a bare model still uses the explicit custom endpoint configuration', async
     },
   );
 });
+
+test('a bare model uses a file-configured env provider', async () => {
+  await withKeelEnv(
+    { KEEL_MODEL: 'custom-model' },
+    (cwd) => {
+      fs.writeFileSync(
+        path.join(cwd, 'config.json'),
+        JSON.stringify({
+          providers: {
+            env: {
+              baseURL: 'https://file-gateway.example/v1',
+              apiKeyEnv: 'FILE_GATEWAY_API_KEY',
+              api: 'openai',
+            },
+          },
+        }),
+      );
+      const cfg = loadConfig(cwd).cfg;
+      assert.equal(cfg.router.main, 'env/custom-model');
+      assert.equal(cfg.providers.env?.baseURL, 'https://file-gateway.example/v1');
+      assert.equal(cfg.providers.env?.apiKeyEnv, 'FILE_GATEWAY_API_KEY');
+    },
+  );
+});

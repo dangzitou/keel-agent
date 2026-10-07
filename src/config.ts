@@ -160,7 +160,7 @@ function applyEnvOverrides(cfg: KeelConfig): boolean {
     if (providerName && providerName !== 'env') return v;
     const baseURL = process.env.KEEL_BASE_URL?.trim();
     const apiKey = process.env.KEEL_API_KEY?.trim();
-    if (!baseURL && !apiKey) return v;
+    if (!cfg.providers.env && !baseURL && !apiKey) return v;
     // Bare model names and explicit env/model may use the generic endpoint when configured.
     if (!cfg.providers.env) {
       const api = (['openai', 'anthropic', 'responses'] as const).includes(process.env.KEEL_API as 'openai')
