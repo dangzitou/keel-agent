@@ -13,7 +13,13 @@ export function latestSessionId(): string {
   if (!metas.length) {
     throw new Error('还没有任何会话。先用 keel run "任务" 或交互模式开一个。');
   }
-  return metas[0]!.id;
+  for (const meta of metas) {
+    const events = SessionStore.open(meta.id).readAll();
+    if (events.some((event) => event.type !== 'session.started')) {
+      return meta.id;
+    }
+  }
+  throw new Error('还没有可用会话。先用 keel run "任务" 或交互模式输入一个任务。');
 }
 
 export function listSessions(ui: Ui): void {
