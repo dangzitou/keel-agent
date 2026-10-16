@@ -56,9 +56,29 @@ test('loadConfig：export 一个 ZHIPU key 即开箱即用（auto 路由生效�
 
 /* ---- continue / 省略 id ---- */
 
-test('latestSessionId 返回最近的会话', () => {
-  SessionStore.create({ cwd, model: 'deepseek/deepseek-chat', interactive: false });
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); // 同步睡 5ms，确保 createdAt 严格更晚
-  const b = SessionStore.create({ cwd, model: 'deepseek/deepseek-chat', interactive: false });
-  assert.equal(latestSessionId(), b.id);
+test('latestSessionId skips a newer empty session', () => {
+  const older = SessionStore.create({ cwd, model: 'deepseek/deepseek-chat', interactive: false });
+  older.append('session.started', { cwd, gitBranch: null, model: 'deepseek/deepseek-chat', interactive: false });
+  older.append('user.message', { text: 'older work' });
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); // 确保按创建时间排序
+  const recent = SessionStore.create({ cwd, model: 'deepseek/deepseek-chat', interactive: false });
+  recent.append('session.started', { cwd, gitBranch: null, model: 'deepseek/deepseek-chat', interactive: false });
+  recent.append('user.message', { text: 'recent work' });
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); // 确保按创建时间排序
+  const empty = SessionStore.create({ cwd, model: 'deepseek/deepseek-chat', interactive: false });
+  empty.append('session.started', { cwd, gitBranch: null, model: 'deepseek/deepseek-chat', interactive: false });
+  assert.equal(latestSessionId(), recent.id);
+});
+
+test('latestSessionId rejects when every session is empty', () => {
+  const originalHome = process.env.KEEL_HOME;
+  process.env.KEEL_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'keel-empty-home-'));
+  try {
+    const empty = SessionStore.create({ cwd, model: 'deepseek/deepseek-chat', interactive: false });
+    empty.append('session.started', { cwd, gitBranch: null, model: 'deepseek/deepseek-chat', interactive: false });
+    assert.throws(() => latestSessionId());
+  } finally {
+    if (originalHome === undefined) delete process.env.KEEL_HOME;
+    else process.env.KEEL_HOME = originalHome;
+  }
 });

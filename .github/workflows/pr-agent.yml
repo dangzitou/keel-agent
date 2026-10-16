@@ -1,0 +1,52 @@
+name: PR-Agent
+
+# PR-Agent（开源 PR 审查 agent，MIT）：PR 打开/更新时自动跑 /describe + /review，
+# 贡献者在 PR 评论里发 /improve、/ask 等命令即可触发对应工具。
+# 文档：https://github.com/The-PR-Agent/pr-agent · 配置参考：pr_agent/settings/configuration.toml
+#
+# 模型走 StepFun（keel 日常模型 step-5-preview）。pr-agent 原生 provider 列表里没有 stepfun，
+# StepFun 提供 OpenAI 兼容接口，因此用 "OpenAI like API" 方式接入：自定义 api_base + 透传模型名。
+# 若 key 只对 step_plan 网关开放（keel 里 responses 协议走的那条），
+# 把下面的 OPENAI__API_BASE 换成 https://api.stepfun.com/step_plan/v1。
+#
+# 为什么用 pull_request_target：本仓库的 PR 主要来自外部 fork，pull_request 事件
+# 拿不到仓库 secrets 且 token 只读；pull_request_target 在 base 仓库上下文运行，
+# 可以正常发评论。注意因此本 job 不做 checkout、不执行 PR 代码，只用 GitHub API 读 diff。
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, review_requested]
+  issue_comment:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  pr_agent_job:
+    # issue_comment 会为普通 issue 也触发，这里限定只处理 PR 评论；忽略机器人防止自我循环
+    if: ${{ github.event.sender.type != 'Bot' && (github.event_name == 'pull_request_target' || github.event.issue.pull_request) }}
+    runs-on: ubuntu-latest
+    name: Run pr agent on every pull request, respond to user comments
+    steps:
+      - name: PR Agent action step
+        id: pragent
+        # 固定到发布版本（而非 @main）；镜像发布在 Docker Hub，可换 digest 进一步加固
+        uses: docker://pragent/pr-agent:0.47.0-github_action
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 需要在仓库 Settings > Secrets > Actions 添加名为 STEPFUN_API_KEY 的 secret
+          OPENAI__KEY: ${{ secrets.STEPFUN_API_KEY }}
+          OPENAI__API_BASE: "https://api.stepfun.com/v1"
+          config.model: "step-5-preview"
+          config.fallback_models: '["step-5-preview"]'
+          # step-5-preview 不在 pr-agent 内置模型表里，必须显式声明上下文上限（100 万 tokens），否则直接报错
+          config.custom_model_max_tokens: "1000000"
+          config.response_language: "zh-CN"
+          github_action_config.auto_describe: "true"
+          github_action_config.auto_review: "true"
+          # /improve 代码建议、/ask 提问改为评论手动触发，避免每次 push 都刷建议
+          github_action_config.auto_improve: "false"
+          github_action_config.pr_actions: '["opened", "reopened", "synchronize", "ready_for_review", "review_requested"]'
+          pr_reviewer.extra_instructions: "重点关注逻辑正确性、边界条件、以及与仓库既有约定的一致性（事件溯源与 fold 推导、fork 只追加不改写历史、退出码与预算契约）；不要纠结格式与注释风格。"
+          pr_description.extra_instructions: "说明动机、改动点和验证方式；格式简洁。"

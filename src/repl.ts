@@ -39,7 +39,7 @@ export interface ReplOptions {
 export async function startRepl(opts: ReplOptions): Promise<void> {
   const cwd = opts.sessionId ? SessionStore.open(opts.sessionId).meta.cwd : opts.cwd;
   let { cfg, sources } = loadConfig(cwd);
-  const ui = new TerminalUi((prompt, signal) => new Promise<boolean>((resolve) => {
+  const ui = new TerminalUi(undefined, (prompt, signal) => new Promise<boolean>((resolve) => {
     if (signal?.aborted) { resolve(false); return; }
     const finish = (answer: boolean) => { signal?.removeEventListener('abort', onAbort); resolve(answer); };
     const onAbort = () => finish(false);

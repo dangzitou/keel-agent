@@ -196,7 +196,7 @@ test('contract: a later failed verification invalidates earlier success; success
 
 test('budget: unknown model prices still enforce tokens and custom prices are attributable', async () => {
   const ctx = fixture();
-  ctx.cfg.router.main = ctx.cfg.router.fast = 'stepfun/step-5-preview';
+  ctx.cfg.router.main = ctx.cfg.router.fast = 'stepfun/step-unpriced-test';
   ctx.cfg.budget.maxTokensPerSession = 100;
   process.env.KEEL_MOCK = '1';
   setMockScript([() => response('write', { path: 'never.txt', content: 'x' })]);
@@ -204,9 +204,9 @@ test('budget: unknown model prices still enforce tokens and custom prices are at
   assert.equal(summary.stopReason, 'budget');
   assert.ok(!fs.existsSync(path.join(ctx.cwd, 'never.txt')));
   assert.equal(fold(ctx.store.readAll()).spend.unpricedCalls, 1);
-  const pricing = { 'stepfun/step-5-preview': { input: 1, output: 2 } };
-  assert.equal(costFor('stepfun/step-5-preview', 1_000_000, 1_000_000, pricing), 3);
-  assert.equal(hasKnownPrice('stepfun/step-5-preview', pricing), true);
+  const pricing = { 'stepfun/step-unpriced-test': { input: 1, output: 2 } };
+  assert.equal(costFor('stepfun/step-unpriced-test', 1_000_000, 1_000_000, pricing), 3);
+  assert.equal(hasKnownPrice('stepfun/step-unpriced-test', pricing), true);
 });
 
 test('input: configuration rejects malformed values and preserves explicit main/fast routes', () => {

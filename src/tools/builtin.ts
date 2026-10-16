@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { once } from 'node:events';
+import { StringDecoder } from 'node:string_decoder';
 import { ToolCtx, ToolDef, ToolOutput } from './types.js';
 import { KeelConfig } from '../config.js';
 import { FileChange } from '../events/types.js';
@@ -230,15 +231,28 @@ export const bashTool: ToolDef = {
       const child = spawn(file, args, { cwd: ctx.cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       let out = '';
       let capped = false;
-      const collect = (chunk: Buffer) => {
+      const stdoutDecoder = new StringDecoder('utf8');
+      const stderrDecoder = new StringDecoder('utf8');
+      const collect = (decoder: StringDecoder) => (chunk: Buffer) => {
         if (out.length >= 200_000) {
           capped = true;
           return;
         }
-        out += chunk.toString();
+        out += decoder.write(chunk);
       };
-      child.stdout.on('data', collect);
-      child.stderr.on('data', collect);
+      const flush = (decoder: StringDecoder) => {
+        const tail = decoder.end();
+        if (!tail) return;
+        if (out.length >= 200_000) {
+          capped = true;
+          return;
+        }
+        out += tail;
+      };
+      child.stdout.on('data', collect(stdoutDecoder));
+      child.stderr.on('data', collect(stderrDecoder));
+      child.stdout.on('end', () => flush(stdoutDecoder));
+      child.stderr.on('end', () => flush(stderrDecoder));
       const killTree = () => {
         try {
           if (child.pid) process.kill(-child.pid, 'SIGKILL');
