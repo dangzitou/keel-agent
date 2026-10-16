@@ -13,6 +13,7 @@ export interface SpendState {
   inputTokens: number;
   outputTokens: number;
   byModel: Record<string, ModelSpend>;
+  unpricedCalls: number;
 }
 
 export interface FoldState {
@@ -20,7 +21,7 @@ export interface FoldState {
   messages: ChatMessage[];
   spend: SpendState;
   turns: number;
-  /** 最近一次成功落盘的文件修改（write/edit 的 tool.call seq） */
+  /** 最近一次可能修改文件或使工作目录验证失效的事件 */
   lastFileModSeq: number;
   /** 最近一次验证通过（verify.result ok 的 seq） */
   lastVerifyOkSeq: number;
@@ -32,10 +33,10 @@ export interface FoldState {
   plan: PlanStep[] | null;
 }
 
-const FILE_MOD_TOOLS = new Set(['write', 'edit']);
+const FILE_MOD_TOOLS = new Set(['write', 'edit', 'bash']);
 
 export function emptySpend(): SpendState {
-  return { totalUsd: 0, inputTokens: 0, outputTokens: 0, byModel: {} };
+  return { totalUsd: 0, inputTokens: 0, outputTokens: 0, byModel: {}, unpricedCalls: 0 };
 }
 
 /**
@@ -56,12 +57,6 @@ export function fold(events: Event[]): FoldState {
     plan: null,
   };
 
-  // 先收集 tool 结果，文件修改只在对应 tool.result ok 时计入
-  const okResults = new Set<string>();
-  for (const e of events as Event<any>[]) {
-    if (e.type === 'tool.result' && e.data.ok) okResults.add(e.data.toolCallId);
-  }
-
   for (const e of events as Event<any>[]) {
     switch (e.type) {
       case 'user.message': {
@@ -74,6 +69,7 @@ export function fold(events: Event[]): FoldState {
       case 'llm.response': {
         const d = e.data;
         const s = st.spend;
+        if (d.costKnown === false) s.unpricedCalls++;
         s.totalUsd += d.costUsd;
         s.inputTokens += d.usage.inputTokens;
         s.outputTokens += d.usage.outputTokens;
@@ -103,11 +99,17 @@ export function fold(events: Event[]): FoldState {
         break;
       }
       case 'tool.call': {
-        if (FILE_MOD_TOOLS.has(e.data.tool) && okResults.has(e.data.toolCallId)) {
+        // ponytail: bash is conservatively dirty; precise tracking needs workspace snapshots.
+        if (FILE_MOD_TOOLS.has(e.data.tool)) {
           st.lastFileModSeq = Math.max(st.lastFileModSeq, e.seq);
           const p = e.data.input?.path;
           if (typeof p === 'string') st.filesTouched.push(p);
         }
+        break;
+      }
+      case 'workspace.rewound': {
+        st.lastFileModSeq = Math.max(st.lastFileModSeq, e.seq);
+        for (const c of e.data.restored ?? []) st.filesTouched.push(c.path);
         break;
       }
       case 'plan.updated': {
@@ -115,7 +117,13 @@ export function fold(events: Event[]): FoldState {
         break;
       }
       case 'verify.result': {
-        if (e.data.ok) st.lastVerifyOkSeq = e.seq;
+        st.lastVerifyOkSeq = e.data.ok ? e.seq : 0;
+        break;
+      }
+      case 'verify.invalidated':
+      case 'verify.started': {
+        st.lastFileModSeq = Math.max(st.lastFileModSeq, e.seq);
+        st.lastVerifyOkSeq = 0;
         break;
       }
       case 'system.note': {

@@ -10,15 +10,30 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: [20, 22]
+        node: [20, 22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
-      - run: npm install
+          cache: npm
+      - run: npm ci
+      - name: 安装 bubblewrap（Linux OS 沙箱）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          # Ubuntu 24.04 用 AppArmor 限制非特权 user namespace，bwrap 需要它
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --version
       - run: npm run build
+      - name: 确认探测到 bwrap
+        run: node -e "import('./dist/tools/sandbox.js').then((m) => { const k = m.detectSandbox(); console.log('detectSandbox():', k); if (k !== 'bwrap') process.exit(1); })"
       - run: npm test
+        env:
+          # 真实沙箱用例在 CI 上必须运行，不许因探测失败而跳过
+          KEEL_REQUIRE_SANDBOX: '1'
       - name: mock 模式端到端 smoke
         run: |
           export KEEL_MOCK=1

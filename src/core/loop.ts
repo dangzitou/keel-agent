@@ -6,8 +6,10 @@ import { ChatMessage } from '../llm/types.js';
 import { fold } from './fold.js';
 import { SessionStore } from './store.js';
 import { estimateTokens } from './tokens.js';
-import { TOOL_NAMES, TOOL_SCHEMAS, executeToolCall, ToolCtx } from '../tools/index.js';
+import { TOOL_NAMES, TOOL_SCHEMAS, executeToolCall, parseToolInput, ToolCtx } from '../tools/index.js';
 import { checkPolicy } from '../policy/policy.js';
+import { applyPreToolHooks } from '../policy/hooks.js';
+import { sandboxFor } from '../tools/sandbox.js';
 import { Ui } from '../ui/render.js';
 
 const MAX_PUSHBACKS = 2;
@@ -54,12 +56,16 @@ export function buildSystemPrompt(cfg: KeelConfig, cwd: string): string {
     '- 不了解仓库结构时先用 glob/grep 探索，再动手。',
     '- 任务包含多个步骤时，先用 plan 工具列出计划，之后每完成一步就更新状态——计划随事件流落盘，用户可以审计你的进度。',
     '- bash 只做必要操作，避免破坏性命令。',
+    ...(cfg.policy.protectPaths.length ? [`- 只读保护（可读不可改）: ${cfg.policy.protectPaths.join(', ')}。`] : []),
+    ...(cfg.policy.writePaths.length ? [`- 只允许修改: ${cfg.policy.writePaths.join(', ')}；其它路径的写入会被拒绝。`] : []),
+    ...(cfg.sandbox.mode !== 'off' ? [`- bash/verify 运行在 OS 沙箱：只能写工作目录与临时目录${cfg.sandbox.network ? '' : '，没有外网（本机 localhost 可用）'}。`] : []),
     '- 用简体中文简要说明你正在做什么和为什么。',
     '',
     '【完成契约 —— 由 harness 强制执行】',
-    '只要你对任何文件做过修改（write/edit），在结束任务前必须调用 verify 工具运行验证',
-    '（不传 commands 时使用项目 .keel.json 的 verify.commands），并确保验证通过。',
+    '只要调用过 write/edit/bash（包括失败或中断），在结束任务前必须调用 verify 工具运行验证。',
+    '项目 .keel.json 的 verify.commands 是必跑检查，commands 仅能追加，必须全部通过。',
     'harness 会拦截缺少验证证据的完成声明并打回。',
+    '分叉或新一轮用户输入会使旧验证证据失效：工作目录可能已被外部修改，必须重新 verify。',
   ].join('\n');
 }
 
@@ -68,7 +74,7 @@ function messagesToText(messages: ChatMessage[]): string {
     .map((m) => {
       const head = `[${m.role}]`;
       if (m.tool_calls?.length) {
-        const calls = m.tool_calls.map((tc) => `${tc.function.name}(${tc.function.arguments.slice(0, 200)})`).join('; ');
+        const calls = m.tool_calls.map((tc) => `${tc.function.name}(${tc.function.arguments})`).join('; ');
         return `${head} ${m.content ?? ''}\n  工具调用: ${calls}`;
       }
       return `${head} ${m.content ?? ''}`;
@@ -77,42 +83,55 @@ function messagesToText(messages: ChatMessage[]): string {
 }
 
 /** 上下文压缩：用 fast 模型把旧消息折叠成摘要。事件流里全量历史永远在，fork 回去即可还原。 */
-async function maybeCompact(store: SessionStore, cfg: KeelConfig, ui: Ui, router: Router, signal?: AbortSignal): Promise<void> {
+async function maybeCompact(store: SessionStore, cfg: KeelConfig, ui: Ui, router: Router, budgetExceeded: () => Promise<boolean>, signal?: AbortSignal): Promise<boolean> {
   const st = fold(store.readAll());
-  if (estimateTokens(st.messages) <= cfg.context.compactThresholdTokens) return;
+  if (estimateTokens(st.messages) <= cfg.context.compactThresholdTokens) return true;
 
   let keep = cfg.context.keepRecentMessages;
   while (keep < st.messages.length && st.messages[st.messages.length - keep]?.role === 'tool') {
     keep++; // 不拆散 assistant(tool_calls) 与其 tool 结果
   }
-  if (st.messages.length <= keep + 2) return;
+  if (st.messages.length <= keep + 2) return true;
 
   const kept = st.messages.slice(st.messages.length - keep);
   const toSummarize = st.messages.slice(0, st.messages.length - keep);
+  const text = messagesToText(toSummarize);
+  const summaries: string[] = [];
   ui.note('上下文过长，用 fast 模型压缩历史…');
-  const res = await router.chat('fast', [
-    {
-      role: 'system',
-      content:
-        '你是对话摘要器。把 agent 会话历史压缩成要点，必须保留：任务目标、已修改的文件路径与改动内容、关键决策、当前状态与未完成事项、验证状态。',
-    },
-    { role: 'user', content: messagesToText(toSummarize).slice(0, 60_000) },
-  ], undefined, { signal });
-  await store.append('llm.response', {
-    role: 'fast',
-    model: res.model,
-    content: res.message.content,
-    toolCalls: [],
-    usage: res.usage,
-    costUsd: res.costUsd,
-    latencyMs: res.latencyMs,
-    inHistory: false,
-  });
+  for (let offset = 0; offset < text.length; offset += 60_000) {
+    if (await budgetExceeded()) return false;
+    await store.append('llm.request', { role: 'fast', model: router.modelRef('fast'), tools: [], messageCount: 2 });
+    const res = await router.chat('fast', [
+      {
+        role: 'system',
+        content:
+          '你是对话摘要器。把 agent 会话历史压缩成要点，必须保留：任务目标、已修改的文件路径与改动内容、关键决策、当前状态与未完成事项、验证状态。',
+      },
+      { role: 'user', content: text.slice(offset, offset + 60_000) },
+    ], undefined, { signal, onRetry: (attempt, error, delayMs) => {
+      store.append('llm.retry', { attempt, error: error.message, delayMs });
+    } });
+    await store.append('llm.response', {
+      role: 'fast',
+      model: res.model,
+      content: res.message.content,
+      toolCalls: [],
+      usage: res.usage,
+      costUsd: res.costUsd,
+      costKnown: res.costKnown,
+      usageEstimated: res.usageEstimated ?? false,
+      latencyMs: res.latencyMs,
+      inHistory: false,
+    });
+    summaries.push(res.message.content ?? '(空摘要)');
+  }
+  // Commit a new view only after every chunk succeeds; errors/budget stops keep the old view.
   await store.append('context.compacted', {
     upToSeq: store.seq,
-    summary: res.message.content ?? '(空摘要)',
+    summary: summaries.join('\n\n'),
     keptMessages: kept,
   });
+  return true;
 }
 
 /**
@@ -120,12 +139,44 @@ async function maybeCompact(store: SessionStore, cfg: KeelConfig, ui: Ui, router
  * 每一步（请求、响应、策略判定、工具结果、压缩）都作为事件落盘——这是 Keel 的一切能力的来源。
  */
 export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
+  const release = opts.store.lock();
+  try {
+    return await runLockedTurn(opts);
+  } catch (e) {
+    opts.ui.spinStop();
+    const stopReason = opts.signal?.aborted ? 'aborted' : 'error';
+    opts.store.append('error', { where: 'turn', message: (e as Error).message });
+    const state = fold(opts.store.readAll());
+    const evidenceOk = state.lastFileModSeq > state.lastVerifyOkSeq ? false : state.lastVerifyOkSeq ? true : null;
+    opts.store.append('turn.completed', { stopReason, evidenceOk, turns: 0, spendUsd: state.spend.totalUsd });
+    opts.ui.error((e as Error).message);
+    return { stopReason, evidenceOk, spendUsd: state.spend.totalUsd };
+  } finally {
+    release();
+  }
+}
+
+async function runLockedTurn(opts: TurnOptions): Promise<TurnSummary> {
   const { store, cfg, ui } = opts;
   const ctx: ToolCtx = { cwd: store.meta.cwd, cfg, store, interactive: opts.interactive, signal: opts.signal };
   const router = new Router(cfg);
   const aborted = () => opts.signal?.aborted ?? false;
 
-  const ev = await store.append('user.message', { text: opts.userText });
+  // A crash/fork can leave an assistant tool batch unfinished. Never replay side effects.
+  const state = fold(store.readAll());
+  // ponytail: invalidate between turns; workspace fingerprints only if rechecking is too costly.
+  if (state.lastVerifyOkSeq) store.append('verify.invalidated', { reason: '新一轮任务开始，工作目录或验证配置可能变化，需重新验证。' });
+  const history = state.messages;
+  const pending = new Map<string, NonNullable<ChatMessage['tool_calls']>[number]>();
+  for (const message of history) {
+    for (const call of message.tool_calls ?? []) pending.set(call.id, call);
+    if (message.role === 'tool' && message.tool_call_id) pending.delete(message.tool_call_id);
+  }
+  for (const call of pending.values()) {
+    store.append('tool.result', { toolCallId: call.id, tool: call.function.name, ok: false,
+      output: '上次执行中断或在此事件处分叉，结果未知；未自动重放。请检查工作目录后继续。', durationMs: 0 });
+  }
+  await store.append('user.message', { text: opts.userText });
   store.setTitle(opts.userText.slice(0, 60));
 
   const sys: ChatMessage = { role: 'system', content: buildSystemPrompt(cfg, ctx.cwd) };
@@ -134,6 +185,17 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
   let stop: StopReason = 'done';
   let evidenceOk: boolean | null = null;
   let iter = 0;
+  const budgetExceeded = async (): Promise<boolean> => {
+    const spend = fold(store.readAll()).spend;
+    const spentTokens = spend.inputTokens + spend.outputTokens;
+    const capTokens = cfg.budget.maxTokensPerSession ?? 0;
+    const usdExceeded = cfg.budget.maxUsdPerSession > 0 && spend.totalUsd >= cfg.budget.maxUsdPerSession;
+    const tokensExceeded = capTokens > 0 && spentTokens >= capTokens;
+    if (!usdExceeded && !tokensExceeded) return false;
+    await store.append('budget.exceeded', { spentUsd: spend.totalUsd, capUsd: cfg.budget.maxUsdPerSession, spentTokens, capTokens });
+    ui.warn(`预算熔断：累计 $${spend.totalUsd.toFixed(4)} / ${cfg.budget.maxUsdPerSession}；tokens ${spentTokens} / ${capTokens}`);
+    return true;
+  };
 
   for (iter = 1; iter <= maxIters; iter++) {
     if (aborted()) {
@@ -141,7 +203,10 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
       break;
     }
 
-    await maybeCompact(store, cfg, ui, router, opts.signal);
+    if (await budgetExceeded()) { stop = 'budget'; break; }
+    if (!await maybeCompact(store, cfg, ui, router, budgetExceeded, opts.signal)) { stop = 'budget'; break; }
+    if (aborted()) { stop = 'aborted'; break; }
+    if (await budgetExceeded()) { stop = 'budget'; break; }
     const st = fold(store.readAll());
     const messages: ChatMessage[] = [sys, ...st.messages];
 
@@ -191,16 +256,15 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
       })),
       usage: res.usage,
       costUsd: res.costUsd,
+      costKnown: res.costKnown,
       latencyMs: res.latencyMs,
       inHistory: true,
       usageEstimated: res.usageEstimated ?? false,
     });
+    if (!res.costKnown && fold(store.readAll()).spend.unpricedCalls === 1) ui.warn('模型价目未知，美元预算无法覆盖该调用；仍执行 token 上限，可在 pricing 配置费率。');
     if (res.message.content?.trim()) ui.assistantText(res.message.content);
 
-    const spend = fold(store.readAll()).spend;
-    if (cfg.budget.maxUsdPerSession > 0 && spend.totalUsd >= cfg.budget.maxUsdPerSession) {
-      await store.append('budget.exceeded', { spentUsd: spend.totalUsd, capUsd: cfg.budget.maxUsdPerSession });
-      ui.warn(`预算熔断：本会话已花费 $${spend.totalUsd.toFixed(4)}，达到上限 $${cfg.budget.maxUsdPerSession}`);
+    if (await budgetExceeded()) {
       stop = 'budget';
       break;
     }
@@ -212,14 +276,13 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
       if (unverified && pushbacks < MAX_PUSHBACKS) {
         pushbacks += 1;
         await store.append('system.note', {
-          text: '完成契约：本会话存在尚未通过验证的文件修改。请调用 verify 工具运行验证并确保通过，之后才能声明任务完成。',
+          text: '完成契约：当前工作目录缺少有效验证证据（文件修改、分叉或新一轮输入会使旧证据失效）。请调用 verify 工具运行验证并确保通过，之后才能声明任务完成。',
           toModel: true,
         });
         ui.warn('harness 拦截：缺少验证证据的完成声明，已打回');
         continue;
       }
       stop = unverified ? 'unverified' : 'done';
-      evidenceOk = unverified ? false : null;
       break;
     }
 
@@ -230,17 +293,21 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
       }
       let input: Record<string, unknown> = {};
       try {
-        input = JSON.parse(call.function.arguments || '{}');
-      } catch {
-        /* 保持空对象，工具自己报参数错误 */
+        input = parseToolInput(call);
+      } catch (e) {
+        await store.append('tool.result', { toolCallId: call.id, tool: call.function.name, ok: false,
+          output: `工具参数错误: ${(e as Error).message}`, durationMs: 0 });
+        continue;
       }
 
-      const verdict = checkPolicy(cfg.policy, { tool: call.function.name, input, cwd: ctx.cwd });
+      const builtin = checkPolicy(cfg.policy, { tool: call.function.name, input, cwd: ctx.cwd, verifyCommands: cfg.verify.commands });
+      const { verdict, hooks } = await applyPreToolHooks(cfg, { session: store.id, cwd: ctx.cwd, tool: call.function.name, input, policy: builtin }, opts.signal);
       await store.append('policy.decision', {
         tool: call.function.name,
         input,
         decision: verdict.decision,
         rule: verdict.rule,
+        ...(hooks.length ? { hooks } : {}),
       });
       if (verdict.decision === 'deny') {
         ui.policyDenied(call.function.name, verdict.rule);
@@ -254,7 +321,7 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
         continue;
       }
       if (verdict.decision === 'approve') {
-        const allowed = opts.autoApprove || (await ui.approve(`允许执行 ${call.function.name}？（命中规则: ${verdict.rule}）`));
+        const allowed = opts.autoApprove || (opts.interactive && await ui.approve(`允许执行 ${call.function.name} ${JSON.stringify(input)}？（命中规则: ${verdict.rule}）`, opts.signal));
         if (!allowed) {
           await store.append('tool.result', {
             toolCallId: call.id,
@@ -268,15 +335,19 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
         }
       }
 
+      if (aborted()) { stop = 'aborted'; break; }
       ui.toolStart(call.function.name, input);
+      const shell = call.function.name === 'bash' || call.function.name === 'verify';
       await store.append('tool.call', {
         toolCallId: call.id,
         tool: call.function.name,
         input,
+        ...(shell ? { sandbox: cfg.sandbox.mode === 'off' ? null : sandboxFor(cfg) ?? 'unavailable' } : {}),
       });
       const t0 = Date.now();
-      const out = await executeToolCall(call, ctx);
+      const out = await executeToolCall(call, { ...ctx, approved: true });
       const durationMs = Date.now() - t0;
+      if (out.changes?.length) await store.append('file.changed', { toolCallId: call.id, tool: call.function.name, changes: out.changes });
       await store.append('tool.result', {
         toolCallId: call.id,
         tool: call.function.name,
@@ -289,12 +360,15 @@ export async function runUserTurn(opts: TurnOptions): Promise<TurnSummary> {
     if (stop === 'aborted') break;
   }
 
-  if (iter > maxIters) stop = 'max-turns';
-  const finalSpend = fold(store.readAll()).spend;
+  if (aborted()) stop = 'aborted';
+  else if (iter > maxIters) stop = 'max-turns';
+  const finalState = fold(store.readAll());
+  const finalSpend = finalState.spend;
+  evidenceOk = finalState.lastFileModSeq > finalState.lastVerifyOkSeq ? false : finalState.lastVerifyOkSeq ? true : null;
   await store.append('turn.completed', {
     stopReason: stop,
     evidenceOk,
-    turns: iter,
+    turns: Math.min(iter, maxIters),
     spendUsd: finalSpend.totalUsd,
   });
   return { stopReason: stop, evidenceOk, spendUsd: finalSpend.totalUsd };

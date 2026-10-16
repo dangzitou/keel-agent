@@ -25,12 +25,12 @@ export function bareModel(modelRef: string): string {
   return i >= 0 ? modelRef.slice(i + 1) : modelRef;
 }
 
-export function costFor(modelRef: string, inputTokens: number, outputTokens: number): number {
-  const p = PRICE_PER_MTOK[bareModel(modelRef)];
+export function costFor(modelRef: string, inputTokens: number, outputTokens: number, pricing?: typeof PRICE_PER_MTOK): number {
+  const p = pricing?.[modelRef] ?? pricing?.[bareModel(modelRef)] ?? PRICE_PER_MTOK[bareModel(modelRef)];
   if (!p) return 0;
   return (inputTokens / 1e6) * p.input + (outputTokens / 1e6) * p.output;
 }
 
-export function hasKnownPrice(modelRef: string): boolean {
-  return bareModel(modelRef) in PRICE_PER_MTOK;
+export function hasKnownPrice(modelRef: string, pricing?: typeof PRICE_PER_MTOK): boolean {
+  return !!(pricing?.[modelRef] ?? pricing?.[bareModel(modelRef)] ?? PRICE_PER_MTOK[bareModel(modelRef)]);
 }

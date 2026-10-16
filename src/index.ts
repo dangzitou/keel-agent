@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, initConfig } from './config.js';
 import { runUserTurn, getGitBranch } from './core/loop.js';
 import { SessionStore } from './core/store.js';
-import { TerminalUi, statusLine } from './ui/render.js';
-import { listSessions, replaySession, forkSession, costReport, doctor, latestSessionId } from './commands.js';
+import { QuietUi, TerminalUi, statusLine } from './ui/render.js';
+import { listSessions, replaySession, forkSession, costReport, doctor, latestSessionId, diffReport, rewindSession } from './commands.js';
 import { startRepl } from './repl.js';
 
 const USAGE = `keel（龙骨）— 可回放、可验证、可审计的编码智能体 CLI
@@ -17,7 +17,9 @@ const USAGE = `keel（龙骨）— 可回放、可验证、可审计的编码智
   keel run "<任务描述>"          单任务模式：完成后退出（--yes 自动放行敏感操作审批）
   keel sessions                 列出所有会话（含花费与验证状态）
   keel replay [id]              只读回放事件流（省略 id = 最近会话）
-  keel fork <id> [--at <seq>]   从第 seq 个事件分叉出新会话（默认到最后）
+  keel fork <id> [--at <seq>]   从第 seq 个事件分叉出新会话（默认到最后；--rewind 同时把文件恢复到断点）
+  keel diff [id] [--at <seq>]   检查点内的文件改动（统一 diff，默认从会话开始）
+  keel rewind [id] [--at <seq>] 把 write/edit 改过的文件恢复到第 seq 个事件（默认撤销最近一轮；--force 覆盖冲突）
   keel cost [id]                成本报告（省略 id = 最近会话）
   keel doctor                   环境体检：配置/密钥/价目/验证命令
   keel init                     生成 ~/.keel/config.json 配置模板（可选，默认值开箱即用）
@@ -26,7 +28,8 @@ const USAGE = `keel（龙骨）— 可回放、可验证、可审计的编码智
   -m, --model <ref>   本次运行的模型（如 glm-anthropic/glm-5.3，覆盖配置）
   --cwd <dir>         项目目录（默认当前目录）
   --session <id>      继续已有会话
-  --at <seq>          fork 的事件断点
+  --at <seq>          fork/diff/rewind 的事件断点
+  --json              keel run 把事件流以 JSONL 实时写到 stdout（供编排方消费）
   -v, --version       版本
 
 退出码（keel run）: 0=done 1=失败/预算/超轮次 2=参数错误 3=存在未验证修改 130=被中断
@@ -54,18 +57,34 @@ interface Flags {
   at?: number;
   yes: boolean;
   model?: string;
+  json: boolean;
+  force: boolean;
+  rewind: boolean;
 }
 
 function parseArgs(argv: string[]): { flags: Flags; positional: string[] } {
-  const flags: Flags = { cwd: process.cwd(), yes: false };
+  const flags: Flags = { cwd: process.cwd(), yes: false, json: false, force: false, rewind: false };
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (a === '--cwd') flags.cwd = path.resolve(argv[++i] ?? '.');
-    else if (a === '--session') flags.session = argv[++i];
-    else if (a === '--at') flags.at = Number(argv[++i]);
+    const value = () => {
+      const v = argv[++i];
+      if (!v || v.startsWith('-')) throw new Error(`${a} 缺少参数`);
+      return v;
+    };
+    if (a === '--') { positional.push(...argv.slice(i + 1)); break; }
+    if (a === '--cwd') flags.cwd = path.resolve(value());
+    else if (a === '--session') flags.session = value();
+    else if (a === '--at') {
+      flags.at = Number(value());
+      if (!Number.isSafeInteger(flags.at) || flags.at < 0) throw new Error('--at 必须是非负整数');
+    }
     else if (a === '--yes') flags.yes = true;
-    else if (a === '-m' || a === '--model') flags.model = argv[++i];
+    else if (a === '--json') flags.json = true;
+    else if (a === '--force') flags.force = true;
+    else if (a === '--rewind') flags.rewind = true;
+    else if (a === '-m' || a === '--model') flags.model = value();
+    else if (a.startsWith('-') && !['--help', '-h'].includes(a)) throw new Error(`未知选项 ${a}`);
     else positional.push(a);
   }
   return { flags, positional };
@@ -77,10 +96,13 @@ async function main(): Promise<void> {
     console.log(version());
     return;
   }
-  const { flags, positional } = parseArgs(argv);
+  let parsed: ReturnType<typeof parseArgs>;
+  try { parsed = parseArgs(argv); } catch (e) { console.error((e as Error).message); process.exitCode = 2; return; }
+  const { flags, positional } = parsed;
   if (flags.model) process.env.KEEL_MODEL = flags.model; // 复用环境变量直配链路
   const cmd = positional.shift() ?? 'chat';
-  const ui = new TerminalUi();
+  // --json：stdout 只留事件流，人读的输出全部静音
+  const ui = flags.json && cmd === 'run' ? new QuietUi() : new TerminalUi();
 
   try {
     switch (cmd) {
@@ -101,15 +123,23 @@ async function main(): Promise<void> {
           process.exitCode = 2;
           return;
         }
-        const { cfg } = loadConfig(flags.cwd);
-        const store = SessionStore.create({ cwd: flags.cwd, model: cfg.router.main, interactive: false });
-        store.append('session.started', {
-          cwd: flags.cwd,
-          gitBranch: getGitBranch(flags.cwd),
+        const existing = flags.session ? SessionStore.open(flags.session) : null;
+        const cwd = existing?.meta.cwd ?? flags.cwd;
+        if (!fs.statSync(cwd).isDirectory()) throw new Error(`工作目录不存在或不是目录: ${cwd}`);
+        const { cfg } = loadConfig(cwd);
+        const store = existing ?? SessionStore.create({ cwd, model: cfg.router.main, interactive: false });
+        if (flags.json) {
+          // 消费方提前断开（EPIPE）只停止推送；回合照常跑完，事件照常落盘
+          process.stdout.on('error', () => { store.onAppend = undefined; });
+          store.onAppend = (e) => process.stdout.write(JSON.stringify(e) + '\n');
+        }
+        if (!existing) store.append('session.started', {
+          cwd,
+          gitBranch: getGitBranch(cwd),
           model: cfg.router.main,
           interactive: false,
         });
-        console.log(`会话 ${store.id} · 任务: ${task}`);
+        if (!flags.json) console.log(`会话 ${store.id} · 任务: ${task}`);
 
         // SIGINT → 中断信号传导到 fetch/bash，turn.completed(aborted) 落盘后以 130 退出
         const controller = new AbortController();
@@ -121,9 +151,12 @@ async function main(): Promise<void> {
             process.exit(130);
           }
         };
-        process.once('SIGINT', onSigint);
+        process.on('SIGINT', onSigint);
+        process.on('SIGTERM', onSigint);
 
-        const summary = await runUserTurn({
+        let summary;
+        try {
+          summary = await runUserTurn({
           store,
           cfg,
           ui,
@@ -131,9 +164,12 @@ async function main(): Promise<void> {
           userText: task,
           autoApprove: flags.yes,
           signal: controller.signal,
-        });
-        process.removeListener('SIGINT', onSigint);
-        ui.status(statusLine(store.id, summary.stopReason, summary.spendUsd, cfg.router.main));
+          });
+        } finally {
+          process.removeListener('SIGINT', onSigint);
+          process.removeListener('SIGTERM', onSigint);
+        }
+        ui.status(statusLine(store.id, summary.stopReason, summary.spendUsd, cfg.router.main, cfg.pricing));
         if (summary.stopReason === 'aborted') {
           process.exitCode = 130;
         } else if (summary.stopReason === 'unverified') {
@@ -152,17 +188,28 @@ async function main(): Promise<void> {
         break;
       case 'fork': {
         const id = requireArg(positional.shift(), 'fork <sessionId> [--at seq]');
-        const at = flags.at != null && !Number.isNaN(flags.at) ? flags.at : null;
-        const child = forkSession(id, at);
-        console.log(`已分叉: ${child.id}（基于 ${id}@${child.meta.forkedAtSeq}，共 ${child.seq} 个历史事件）`);
+        const at = flags.at ?? null;
+        if (at === 0) throw new Error('fork 的 --at 必须是正整数');
+        const child = forkSession(id, at, { rewind: flags.rewind, force: flags.force });
+        console.log(`已分叉: ${child.id}（基于 ${id}@${child.meta.forkedAtSeq}，继承 ${child.meta.forkedAtSeq} 个历史事件，${flags.rewind ? '文件已恢复到断点，' : ''}需重新验证）`);
         console.log(`继续它: keel --session ${child.id}`);
         break;
       }
       case 'cost':
         costReport(positional.shift() ?? latestSessionId(), ui);
         break;
+      case 'diff':
+        console.log(diffReport(positional.shift() ?? latestSessionId(), flags.at ?? null));
+        break;
+      case 'rewind': {
+        const r = rewindSession(positional.shift() ?? latestSessionId(), flags.at ?? null, flags.force);
+        console.log(r.restored
+          ? `已把 ${r.restored} 个文件恢复到事件 ${r.toSeq}（会话 ${r.store.id}，需重新验证；bash 的改动不在检查点内）`
+          : `事件 ${r.toSeq} 之后检查点内没有文件改动，无需恢复`);
+        break;
+      }
       case 'doctor': {
-        const { checks, ok } = doctor();
+        const { checks, ok } = doctor(flags.cwd);
         for (const c of checks) {
           const mark = c.level === 'ok' ? '✓' : c.level === 'warn' ? '!' : '✗';
           console.log(`${mark} ${c.name}: ${c.detail}`);
@@ -202,4 +249,4 @@ function requireArg(v: string | undefined, usage: string): string {
   return v;
 }
 
-main();
+main().catch((e) => { console.error((e as Error).message); process.exitCode = 1; });

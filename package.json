@@ -8,10 +8,13 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md",
+    "VALIDATION.md",
+    ".github/assets/banner.svg"
   ],
   "engines": {
-    "node": ">=18.17"
+    "node": ">=20"
   },
   "os": [
     "darwin",
@@ -22,6 +25,8 @@
     "dev": "tsx src/index.ts",
     "pretest": "npm run build",
     "test": "node --import tsx --test test/*.test.ts",
+    "eval:stepfun": "npm run build && node test/live-stepfun.mjs",
+    "eval:repo": "npm run build && node test/live-repo.mjs",
     "prepack": "npm run build"
   },
   "keywords": [
@@ -34,7 +39,7 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.14.0",
-    "tsx": "^4.16.0",
-    "typescript": "^5.5.0"
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
   }
 }

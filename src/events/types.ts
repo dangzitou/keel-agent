@@ -15,8 +15,11 @@ export type EventName =
   | 'tool.result'
   | 'plan.updated'
   | 'policy.decision'
+  | 'file.changed'
+  | 'workspace.rewound'
   | 'verify.started'
   | 'verify.result'
+  | 'verify.invalidated'
   | 'context.compacted'
   | 'turn.completed'
   | 'budget.exceeded'
@@ -91,6 +94,7 @@ export interface LlmResponseData {
   inHistory: boolean;
   /** 流式响应未回传 usage 时按字符估算 */
   usageEstimated?: boolean;
+  costKnown?: boolean;
 }
 
 export interface PolicyDecisionData {
@@ -98,12 +102,40 @@ export interface PolicyDecisionData {
   input: Record<string, unknown>;
   decision: 'allow' | 'deny' | 'approve';
   rule: string | null;
+  /** 参与判定的外部 hook（按执行顺序），用于审计谁拦下/放行了这次调用 */
+  hooks?: { command: string; decision: 'allow' | 'deny' | 'approve'; reason: string; durationMs: number }[];
 }
 
 export interface ToolCallData {
   toolCallId: string;
   tool: string;
   input: Record<string, unknown>;
+  /** bash/verify 实际所在的 OS 沙箱；null = 未开启 */
+  sandbox?: 'seatbelt' | 'bwrap' | 'unavailable' | null;
+}
+
+/** 一个文件的内容变化：before/after 是会话 blobs/ 下的 sha256；null = 文件不存在 */
+export interface FileChange {
+  path: string;
+  before: string | null;
+  after: string | null;
+  /** 原文件过大或不是普通文件，没有快照，无法 rewind */
+  untracked?: boolean;
+}
+
+/** 检查点：write/edit 写入前后的内容快照，keel diff / rewind 由此还原 */
+export interface FileChangedData {
+  toolCallId: string;
+  tool: string;
+  changes: FileChange[];
+}
+
+/** rewind：把 write/edit 改过的文件恢复到 toSeq 时的内容（bash 的改动不在检查点内） */
+export interface WorkspaceRewoundData {
+  toSeq: number;
+  /** 检查点来源会话（fork --rewind 时是父会话） */
+  fromSession: string;
+  restored: FileChange[];
 }
 
 export interface ToolResultData {
@@ -162,6 +194,8 @@ export interface TurnCompletedData {
 export interface BudgetExceededData {
   spentUsd: number;
   capUsd: number;
+  spentTokens?: number;
+  capTokens?: number;
 }
 
 export interface ErrorData {
