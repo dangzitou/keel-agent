@@ -42,6 +42,8 @@ jobs:
           config.fallback_models: '["openai/step-5-preview"]'
           # step-5-preview 不在 pr-agent 内置模型表里，必须显式声明上下文上限（100 万 tokens），否则直接报错
           config.custom_model_max_tokens: "1000000"
+          # pr-agent 默认单次请求超时 120 秒；step-5-preview 审查大 diff 需要更久（实测 120 秒内返回不了）
+          config.ai_timeout: "900"
           config.response_language: "zh-CN"
           github_action_config.auto_describe: "true"
           github_action_config.auto_review: "true"
