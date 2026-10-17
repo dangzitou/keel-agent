@@ -119,7 +119,7 @@ npm run eval:stepfun
 - **检查点**：write/edit 前后快照（内容寻址，存于会话 `blobs/`）；`keel diff`、`keel rewind`（默认撤销最近一轮，磁盘与检查点不一致时拒绝，`--force` 覆盖）、`keel fork --rewind`。bash 的改动不在检查点内。
 - **`keel run --json`**：stdout 只输出 JSONL 事件流。
 
-本地验证（macOS，Node `v22.23.2`）：新增 `test/control.test.ts` 共 **10** 项，全套 **89/89** 通过。真实 seatbelt 用例实际验证：写工作目录成功；写工作目录外（非临时目录）、读 `.env`、改 `.keel.json`、读事件库、连外网均失败。变异检查：去掉沙箱包装或跳过 hooks 后，对应 4 项用例失败。沙箱内 `npm run build`、`git status`、`npm ls` 正常。**Linux bwrap 路径只有单元级逻辑，未在真实 Linux 主机运行**；CI 的 Ubuntu runner 没有 bwrap 时该用例跳过。
+本地验证（macOS，Node `v22.23.2`）：新增 `test/control.test.ts` 共 **10** 项，全套 **89/89** 通过。真实 seatbelt 用例实际验证：写工作目录成功；写工作目录外（非临时目录）、读 `.env`、改 `.keel.json`、读事件库、连外网均失败。变异检查：去掉沙箱包装或跳过 hooks 后，对应 4 项用例失败。沙箱内 `npm run build`、`git status`、`npm ls` 正常。Linux bwrap 路径在 GitHub Actions（ubuntu-latest，Node 20/22/24）上实际运行：CI 安装 bubblewrap、解除 AppArmor 对非特权 user namespace 的限制，探测结果为 `bwrap`，并以 `KEEL_REQUIRE_SANDBOX=1` 强制运行真实沙箱用例（不允许跳过）；合并 main 后全套 **100/100** 通过（PR #22）。
 
 ## 生产使用边界
 
