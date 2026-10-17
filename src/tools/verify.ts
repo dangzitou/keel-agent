@@ -3,6 +3,7 @@ import path from 'node:path';
 import { ToolCtx, ToolDef, ToolOutput } from './types.js';
 import { VerifyCommandResult, VerifyResultData } from '../events/types.js';
 import { bashTool } from './builtin.js';
+import { checkPolicy, verificationCommands } from '../policy/policy.js';
 
 /**
  * verify：完成契约的执行端。跑验证命令、生成证据（事件 + evidence/ 文件）。
@@ -23,9 +24,11 @@ export const verifyTool: ToolDef = {
     },
   },
   run: async (input, ctx: ToolCtx): Promise<ToolOutput> => {
-    const commands = (Array.isArray(input.commands) && input.commands.length
-      ? input.commands.map(String)
-      : ctx.cfg.verify.commands) as string[];
+    const commands = verificationCommands(input, ctx.cfg.verify.commands);
+    const verdict = checkPolicy(ctx.cfg.policy, { tool: 'verify', input, cwd: ctx.cwd, verifyCommands: ctx.cfg.verify.commands });
+    if (verdict.decision === 'deny' || (verdict.decision === 'approve' && !ctx.approved)) {
+      return { ok: false, output: `验证命令被策略拒绝或尚未审批: ${verdict.rule}` };
+    }
     if (!commands.length) {
       return {
         ok: false,
@@ -38,17 +41,18 @@ export const verifyTool: ToolDef = {
 
     const results: VerifyCommandResult[] = [];
     for (const cmd of commands) {
+      if (ctx.signal?.aborted) break;
       const t0 = Date.now();
       const r = await bashTool.run({ command: cmd, timeoutMs: 300_000 }, ctx);
       results.push({
         command: cmd,
-        code: r.exitCode ?? (r.ok ? 0 : 1),
+        code: r.ok ? (r.exitCode ?? 0) : (r.exitCode || 1),
         durationMs: Date.now() - t0,
         outputExcerpt: r.output.split('\n').slice(-30).join('\n').slice(0, 2000),
       });
     }
 
-    const ok = results.every((r) => r.code === 0);
+    const ok = !ctx.signal?.aborted && results.length === commands.length && results.every((r) => r.code === 0);
     const data: VerifyResultData = { ok, results };
     const ev = ctx.store.append('verify.result', data);
 
@@ -57,7 +61,7 @@ export const verifyTool: ToolDef = {
       fs.writeFileSync(
         path.join(ctx.store.evidenceDir(), `${ev.seq}.json`),
         JSON.stringify({ seq: ev.seq, ts: ev.ts, ok, results }, null, 2),
-        'utf8',
+        { encoding: 'utf8', mode: 0o600 },
       );
     } catch {
       /* 证据文件写失败不影响主流程，事件里已有 */

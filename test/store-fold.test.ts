@@ -91,10 +91,11 @@ test('fork: 复制事件前缀并在断点后继续', () => {
   assert.equal(child.id !== parent.id, true);
   assert.equal(child.meta.parent, parent.id);
   assert.equal(child.meta.forkedAtSeq, 3);
-  assert.equal(child.seq, 3);
+  assert.equal(child.seq, 4);
   const childEvents = child.readAll();
-  assert.equal(childEvents.length, 3);
+  assert.equal(childEvents.length, 4);
+  assert.equal(childEvents.at(-1)!.type, 'verify.invalidated');
   assert.ok(childEvents.every((e) => e.session === child.id), '复制的事件应归属新会话');
   const next = child.append('user.message', { text: '从断点继续' });
-  assert.equal(next.seq, 4);
+  assert.equal(next.seq, 5);
 });

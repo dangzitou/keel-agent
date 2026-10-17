@@ -18,7 +18,7 @@ npm test                      # full suite; must be green
 KEEL_MOCK=1 node dist/index.js run "write a hello"   # no API key needed
 ```
 
-Requirements: Node ≥ 18.17. No other tooling — the repo is zero-dependency at runtime and near-zero at dev time on purpose. resist adding dependencies.
+Requirements: Node ≥ 20. No other tooling — the repo is zero-dependency at runtime and near-zero at dev time on purpose. resist adding dependencies.
 
 ## Code map
 

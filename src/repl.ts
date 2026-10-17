@@ -5,7 +5,7 @@ import { fold } from './core/fold.js';
 import { runUserTurn, getGitBranch } from './core/loop.js';
 import { TerminalUi, statusLine } from './ui/render.js';
 import { ansi } from './util/ansi.js';
-import { forkSession, listSessions, replaySession, costReport } from './commands.js';
+import { forkSession, listSessions, replaySession, costReport, diffReport, rewindSession } from './commands.js';
 
 const BANNER = [
   '██╗  ██╗ ███████╗███████╗██╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗',
@@ -24,7 +24,9 @@ const HELP = `命令:
   /replay [id]          只读回放某个会话的事件流
   /fork <id> [seq]      从事件 seq 分叉新会话（默认到最后），并切换过去
   /cost [id]            成本报告（按模型、验证状态）
-  /policy               查看当前生效策略
+  /diff [seq]           本会话检查点内的文件改动（默认从会话开始）
+  /rewind [seq]         把 write/edit 改过的文件恢复到事件 seq（默认撤销上一轮）
+  /policy               查看当前生效策略（含沙箱与 hooks）
   /exit                 退出（Ctrl+C 两次）
 
 提示: 回合进行中输入的文本会排队，回合结束后依次执行；Ctrl+C 安全中断当前回合。`;
@@ -35,10 +37,18 @@ export interface ReplOptions {
 }
 
 export async function startRepl(opts: ReplOptions): Promise<void> {
-  const { cfg, sources } = loadConfig(opts.cwd);
-  const ui = new TerminalUi();
+  const cwd = opts.sessionId ? SessionStore.open(opts.sessionId).meta.cwd : opts.cwd;
+  let { cfg, sources } = loadConfig(cwd);
+  const ui = new TerminalUi(undefined, (prompt, signal) => new Promise<boolean>((resolve) => {
+    if (signal?.aborted) { resolve(false); return; }
+    const finish = (answer: boolean) => { signal?.removeEventListener('abort', onAbort); resolve(answer); };
+    const onAbort = () => finish(false);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    // Reuse the REPL readline: an approval answer must not also become a queued task.
+    rl.question(`${prompt} [y/N] `, { signal }, (answer) => finish(/^y(es)?$/i.test(answer.trim())));
+  }));
 
-  let store = openOrCreate(opts.sessionId, opts.cwd, cfg);
+  let store = openOrCreate(opts.sessionId, cwd, cfg);
   const projectCwd = store.meta.cwd;
 
   const bannerModel = process.env.KEEL_MOCK === '1' ? 'mock 模式（KEEL_MOCK=1）' : cfg.router.main;
@@ -57,14 +67,25 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
   let busy = false;
   let controller: AbortController | null = null;
   const queue: string[] = [];
+  let closed = false;
+  const finish = () => {
+    process.removeListener('SIGINT', onInterrupt);
+    process.removeListener('SIGTERM', onTerminate);
+    ui.note('会话已持久化，随时 keel --session <id> 继续。');
+  };
 
   const processInput = (text: string): void => {
     busy = true;
     controller = new AbortController();
-    runUserTurn({ store, cfg, ui, interactive: true, userText: text, autoApprove: false, signal: controller.signal })
-      .then((summary) => {
-        if (summary.stopReason === 'aborted') ui.warn('回合已中断（已执行部分完整落盘，可 fork 回溯）');
-        ui.status(statusLine(store.id, summary.stopReason, summary.spendUsd, cfg.router.main));
+    Promise.resolve().then(async () => {
+      cfg = loadConfig(store.meta.cwd).cfg;
+      if (text.startsWith('/')) {
+        handleSlash(text, { store: () => store, setStore: (s) => void (store = s), cfg, ui });
+        return;
+      }
+      const summary = await runUserTurn({ store, cfg, ui, interactive: Boolean(process.stdin.isTTY), userText: text, autoApprove: false, signal: controller!.signal });
+      if (summary.stopReason === 'aborted') ui.warn('回合已中断（已执行部分完整落盘，可 fork 回溯）');
+      ui.status(statusLine(store.id, summary.stopReason, summary.spendUsd, cfg.router.main, cfg.pricing));
       })
       .catch((e) => ui.error(`回合异常: ${(e as Error).stack ?? e}`))
       .finally(() => {
@@ -72,11 +93,12 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         controller = null;
         const next = queue.shift();
         if (next) processInput(next);
-        else rl.prompt();
+        else if (!closed) rl.prompt();
+        else finish();
       });
   };
 
-  rl.on('SIGINT', () => {
+  const onInterrupt = () => {
     if (busy) {
       if (controller && !controller.signal.aborted) {
         controller.abort();
@@ -88,10 +110,20 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     } else {
       rl.close();
     }
-  });
+  };
+  const onTerminate = () => {
+    if (process.exitCode === 130) { process.exit(130); }
+    process.exitCode = 130;
+    queue.length = 0;
+    controller?.abort();
+    rl.close();
+  };
+  rl.on('SIGINT', onInterrupt);
+  process.on('SIGINT', onInterrupt);
+  process.on('SIGTERM', onTerminate);
   rl.on('close', () => {
-    console.log('\n再见。会话已持久化，随时 keel --session <id> 继续。');
-    process.exit(0);
+    closed = true;
+    if (!busy) finish();
   });
 
   rl.on('line', (line) => {
@@ -101,6 +133,8 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
       return;
     }
     if (text === '/exit' || text === '/quit') {
+      queue.length = 0;
+      controller?.abort();
       rl.close();
       return;
     }
@@ -110,7 +144,10 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
       return;
     }
     if (text.startsWith('/')) {
-      handleSlash(text, { store: () => store, setStore: (s) => void (store = s), cfg, ui });
+      try {
+        cfg = loadConfig(store.meta.cwd).cfg;
+        handleSlash(text, { store: () => store, setStore: (s) => void (store = s), cfg, ui });
+      } catch (e) { ui.error((e as Error).message); }
       rl.prompt();
       return;
     }
@@ -192,8 +229,17 @@ function handleSlash(
     case '/cost':
       costReport(args[0] ?? ctx.store().id, ctx.ui);
       break;
+    case '/diff':
+      console.log(diffReport(ctx.store().id, args[0] != null ? Number(args[0]) : null));
+      break;
+    case '/rewind': {
+      const at = args[0] != null ? Number(args[0]) : null;
+      const r = rewindSession(ctx.store().id, at, args.includes('--force'));
+      ctx.ui.status(r.restored ? `已把 ${r.restored} 个文件恢复到事件 ${r.toSeq}，需重新验证` : `事件 ${r.toSeq} 之后检查点内没有文件改动`);
+      break;
+    }
     case '/policy':
-      ctx.ui.status(JSON.stringify(ctx.cfg.policy, null, 2));
+      ctx.ui.status(JSON.stringify({ policy: ctx.cfg.policy, sandbox: ctx.cfg.sandbox, hooks: ctx.cfg.hooks }, null, 2));
       break;
     default:
       ctx.ui.error(`未知命令 ${cmd}，/help 查看帮助`);

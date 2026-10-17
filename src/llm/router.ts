@@ -3,7 +3,7 @@ import { ChatMessage, ChatResult, LlmProvider, ToolSchema } from './types.js';
 import { OpenAICompatProvider, MockProvider } from './provider.js';
 import { AnthropicProvider } from './anthropic.js';
 import { ResponsesProvider } from './responses.js';
-import { costFor } from './cost.js';
+import { costFor, hasKnownPrice } from './cost.js';
 import { withRetry } from './retry.js';
 
 export interface ChatCallOpts {
@@ -70,7 +70,7 @@ export class Router {
     messages: ChatMessage[],
     tools?: ToolSchema[],
     opts: ChatCallOpts = {},
-  ): Promise<ChatResult & { model: string; costUsd: number; latencyMs: number }> {
+  ): Promise<ChatResult & { model: string; costUsd: number; costKnown: boolean; latencyMs: number }> {
     const { modelRef, model, provider } = this.resolve(role);
     const params = {
       model,
@@ -88,7 +88,14 @@ export class Router {
       onRetry: opts.onRetry,
     });
     const latencyMs = Date.now() - t0;
-    const costUsd = costFor(modelRef, result.usage.inputTokens, result.usage.outputTokens);
-    return { ...result, model, costUsd, latencyMs };
+    if (!result.message.content?.trim() && !result.message.tool_calls.length) throw new Error('LLM 响应为空，不能作为任务完成');
+    const ids = new Set<string>();
+    for (const call of result.message.tool_calls) {
+      if (!call.id || ids.has(call.id) || !call.function?.name || typeof call.function.arguments !== 'string') throw new Error('LLM 返回了非法或重复的工具调用');
+      ids.add(call.id);
+    }
+    for (const tokens of Object.values(result.usage)) if (!Number.isFinite(tokens) || tokens < 0) throw new Error('LLM 返回了非法 usage');
+    const costUsd = costFor(modelRef, result.usage.inputTokens, result.usage.outputTokens, this.cfg.pricing);
+    return { ...result, model, costUsd, costKnown: hasKnownPrice(modelRef, this.cfg.pricing), latencyMs };
   }
 }

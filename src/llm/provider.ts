@@ -1,5 +1,5 @@
 import { ChatParams, ChatResult, LlmProvider } from './types.js';
-import { estimateUsage, httpError, postJson, requestSignal, sseDataChunks } from './http.js';
+import { estimateUsage, httpError, postJson, requestSignal, responseJson, sseDataChunks } from './http.js';
 
 export { requestSignal, httpError };
 
@@ -80,23 +80,25 @@ export class OpenAICompatProvider implements LlmProvider {
 
   private async chatOnce(params: ChatParams): Promise<ChatResult> {
     const res = await this.post(params, OpenAICompatProvider.buildBody(params, false));
-    const json = (await res.json()) as {
-      choices?: { message?: { content: string | null; tool_calls?: unknown[] } }[];
+    const json = (await responseJson(res)) as {
+      choices?: { finish_reason?: string; message?: { content: string | null; tool_calls?: unknown[] } }[];
       usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
     const msg = json.choices?.[0]?.message;
+    if (json.choices?.[0]?.finish_reason === 'length') throw new Error('LLM 输出被 length 截断');
     if (!msg) throw new Error(`LLM 响应缺少 choices[0].message: ${JSON.stringify(json).slice(0, 300)}`);
     const tool_calls = (msg.tool_calls ?? []) as {
       id: string;
       type: 'function';
       function: { name: string; arguments: string };
     }[];
+    const message = { content: msg.content ?? null, tool_calls };
     return {
-      message: { content: msg.content ?? null, tool_calls },
-      usage: {
+      message,
+      ...(!json.usage ? { usage: estimateUsage(params.messages, message), usageEstimated: true } : { usage: {
         inputTokens: json.usage?.prompt_tokens ?? 0,
         outputTokens: json.usage?.completion_tokens ?? 0,
-      },
+      } }),
     };
   }
 
@@ -105,20 +107,22 @@ export class OpenAICompatProvider implements LlmProvider {
     if (!res.body) throw new Error('流式响应缺少 body');
     const acc = new StreamAccumulator();
     let emitted = false;
+    let completed = false;
     try {
       for await (const payload of sseDataChunks(res)) {
-        try {
-          const chunk = JSON.parse(payload);
-          const before = acc.content;
-          acc.push(chunk);
-          if (acc.content !== before) {
-            emitted = true;
-            params.onDelta?.(acc.content.slice(before.length));
-          }
-        } catch {
-          /* 非 JSON 心流行，忽略 */
+        if (payload === '[DONE]') { completed = true; continue; }
+        const chunk = JSON.parse(payload);
+        if (chunk.error) throw new Error(`LLM 流式请求失败: ${chunk.error.message ?? ''}`);
+        if (chunk.choices?.[0]?.finish_reason === 'length') throw new Error('LLM 输出被 length 截断');
+        if (chunk.choices?.[0]?.finish_reason != null) completed = true;
+        const before = acc.content;
+        acc.push(chunk);
+        if (acc.content !== before) {
+          emitted = true;
+          params.onDelta?.(acc.content.slice(before.length));
         }
       }
+      if (!completed) throw new Error('LLM 流被截断：缺少完成标记');
     } catch (e) {
       // 已经流出一部分文本后再失败：重试会导致输出重复，标记为不可重试
       if (emitted) (e as { noRetry?: boolean }).noRetry = true;

@@ -1,5 +1,5 @@
 import { ChatParams, ChatResult, LlmProvider, ToolCall } from './types.js';
-import { estimateUsage, postJson, sseDataChunks } from './http.js';
+import { estimateUsage, postJson, responseJson, sseDataChunks } from './http.js';
 
 /** 内部消息（OpenAI 风格）→ OpenAI Responses 请求体 */
 export function toResponsesBody(params: ChatParams, stream: boolean): Record<string, unknown> {
@@ -37,7 +37,9 @@ export function toResponsesBody(params: ChatParams, stream: boolean): Record<str
 }
 
 /** Responses 响应 JSON → 内部消息（output 项里取文本与 function_call） */
-export function fromResponsesResponse(json: { output?: { type: string; content?: { type: string; text?: string }[]; call_id?: string; name?: string; arguments?: string }[]; usage?: { input_tokens?: number; output_tokens?: number } }): { message: ChatResult['message']; usage: ChatResult['usage'] } {
+export function fromResponsesResponse(json: { status?: string; error?: { message?: string }; output?: { type: string; content?: { type: string; text?: string }[]; call_id?: string; name?: string; arguments?: string }[]; usage?: { input_tokens?: number; output_tokens?: number } }): ChatResult {
+  if (json.error || (json.status && json.status !== 'completed')) throw new Error(`Responses 请求未完成: ${json.status ?? ''} ${json.error?.message ?? ''}`);
+  if (!Array.isArray(json.output) || !json.output.length) throw new Error('Responses 响应缺少 output');
   const text: string[] = [];
   const tool_calls: ToolCall[] = [];
   for (const item of json.output ?? []) {
@@ -61,6 +63,7 @@ export function fromResponsesResponse(json: { output?: { type: string; content?:
  */
 export class ResponsesStreamAccumulator {
   content = '';
+  completed = false;
   usage: { inputTokens: number; outputTokens: number } | undefined;
   private calls: { id: string; name: string; arguments: string }[] = [];
 
@@ -75,10 +78,15 @@ export class ResponsesStreamAccumulator {
         }
         break;
       case 'response.completed':
+        this.completed = true;
         if (evt.response?.usage) {
           this.usage = { inputTokens: evt.response.usage.input_tokens ?? 0, outputTokens: evt.response.usage.output_tokens ?? 0 };
         }
         break;
+      case 'response.failed':
+      case 'response.incomplete':
+      case 'error':
+        throw new Error(`Responses 流式请求未完成: ${evt.type}`);
     }
   }
 
@@ -106,12 +114,8 @@ export class ResponsesProvider implements LlmProvider {
       let emitted = false;
       try {
         for await (const payload of sseDataChunks(res)) {
-          let evt: Parameters<ResponsesStreamAccumulator['push']>[0];
-          try {
-            evt = JSON.parse(payload);
-          } catch {
-            continue;
-          }
+          if (payload === '[DONE]') continue;
+          const evt = JSON.parse(payload) as Parameters<ResponsesStreamAccumulator['push']>[0];
           const before = acc.content;
           acc.push(evt);
           if (acc.content !== before) {
@@ -119,6 +123,7 @@ export class ResponsesProvider implements LlmProvider {
             params.onDelta?.(acc.content.slice(before.length));
           }
         }
+        if (!acc.completed) throw new Error('Responses 流被截断：缺少 response.completed');
       } catch (e) {
         if (emitted) (e as { noRetry?: boolean }).noRetry = true;
         throw e;
@@ -128,6 +133,8 @@ export class ResponsesProvider implements LlmProvider {
       return { message, usage: estimateUsage(params.messages, message), usageEstimated: true };
     }
     const res = await postJson(url, { headers, body: toResponsesBody(params, false), signal: params.signal, timeoutMs: params.timeoutMs });
-    return fromResponsesResponse((await res.json()) as Parameters<typeof fromResponsesResponse>[0]);
+    const json = await responseJson(res) as Parameters<typeof fromResponsesResponse>[0];
+    const result = fromResponsesResponse(json);
+    return json.usage ? result : { ...result, usage: estimateUsage(params.messages, result.message), usageEstimated: true };
   }
 }

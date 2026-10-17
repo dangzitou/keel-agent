@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { bashTool } from '../src/tools/builtin.js';
+import { defaultConfig } from '../src/config.js';
 import type { ToolCtx } from '../src/tools/types.js';
 
-const toolContext = { cwd: process.cwd() } as unknown as ToolCtx;
+const toolContext = { cwd: process.cwd(), cfg: defaultConfig() } as unknown as ToolCtx;
 
 for (const streamName of ['stdout', 'stderr'] as const) {
   test('bash preserves UTF-8 split across ' + streamName + ' chunks', async () => {

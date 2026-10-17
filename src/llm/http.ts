@@ -1,19 +1,16 @@
 import { ChatMessage } from './types.js';
 
-/** 组合外部中断信号与超时信号（Node 18 无 AbortSignal.any 时退化为二选一） */
-export function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
+/** 组合外部中断与超时 */
+export function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
   const timeout = AbortSignal.timeout(timeoutMs);
-  const any = (AbortSignal as unknown as { any?: (sigs: AbortSignal[]) => AbortSignal }).any;
-  if (any) {
-    return signal ? any([signal, timeout]) : timeout;
-  }
-  return signal ?? timeout;
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 export function httpError(status: number, body: string, retryAfterHeader: string | null): Error & { status: number; retryAfterMs?: number } {
   const e = new Error(`LLM 请求失败 HTTP ${status}: ${body.slice(0, 500)}`) as Error & { status: number; retryAfterMs?: number };
   e.status = status;
-  const ra = retryAfterHeader ? Number(retryAfterHeader) * 1000 : NaN;
+  const seconds = Number(retryAfterHeader);
+  const ra = retryAfterHeader ? (Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfterHeader) - Date.now()) : NaN;
   if (Number.isFinite(ra) && ra > 0) e.retryAfterMs = ra;
   return e;
 }
@@ -21,12 +18,13 @@ export function httpError(status: number, body: string, retryAfterHeader: string
 /** 三种协议共用的 POST：统一中断语义（用户主动中断标记 noRetry）与 HTTP 错误包装 */
 export async function postJson(url: string, init: { headers: Record<string, string>; body: unknown; signal?: AbortSignal; timeoutMs?: number }): Promise<Response> {
   let res: Response;
+  const signal = requestSignal(init.signal, init.timeoutMs ?? 600_000);
   try {
     res = await fetch(url, {
       method: 'POST',
       headers: init.headers,
       body: JSON.stringify(init.body),
-      signal: requestSignal(init.signal, init.timeoutMs ?? 600_000),
+      signal,
     });
   } catch (e) {
     if (init.signal?.aborted) {
@@ -38,27 +36,41 @@ export async function postJson(url: string, init: { headers: Record<string, stri
   }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw httpError(res.status, text, res.headers.get('retry-after'));
+    let safeText = text;
+    for (const header of ['authorization', 'x-api-key']) {
+      const key = init.headers[header]?.replace(/^Bearer /i, '');
+      if (key) safeText = safeText.replaceAll(key, '[redacted]');
+    }
+    throw httpError(res.status, safeText, res.headers.get('retry-after'));
   }
   return res;
 }
 
-/** 逐条产出 SSE data 载荷（跳过 [DONE] 与非 JSON 心流行），三种协议的流式解析共用 */
+export async function responseJson(res: Response): Promise<any> {
+  return res.json();
+}
+
+/** SSE data frames: CRLF, multiline data and a final unterminated frame are supported. */
 export async function* sseDataChunks(res: Response): AsyncGenerator<string> {
   if (!res.body) throw new Error('流式响应缺少 body');
   const decoder = new TextDecoder();
   let buf = '';
+  let data: string[] = [];
   for await (const raw of res.body) {
     buf += decoder.decode(raw as Uint8Array, { stream: true });
     let idx: number;
     while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim();
+      const line = buf.slice(0, idx).replace(/\r$/, '');
       buf = buf.slice(idx + 1);
-      if (!line.startsWith('data:')) continue;
-      const payload = line.slice(5).trim();
-      if (payload && payload !== '[DONE]') yield payload;
+      if (line === '') {
+        if (data.length) yield data.join('\n');
+        data = [];
+      } else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
     }
   }
+  buf += decoder.decode();
+  if (buf.startsWith('data:')) data.push(buf.slice(5).replace(/^ /, '').replace(/\r$/, ''));
+  if (data.length) yield data.join('\n');
 }
 
 /** usage 兜底估算：服务未回传 usage 时按字符估（与 OpenAI 兼容层同一套口径） */

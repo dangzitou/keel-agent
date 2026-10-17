@@ -1,8 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { Worker } from 'node:worker_threads';
+import { once } from 'node:events';
 import { StringDecoder } from 'node:string_decoder';
 import { ToolCtx, ToolDef, ToolOutput } from './types.js';
+import { KeelConfig } from '../config.js';
+import { FileChange } from '../events/types.js';
+import { canonicalPath, checkPolicy } from '../policy/policy.js';
+import { detectSandbox, sandboxedCommand } from './sandbox.js';
 
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', '.keel', '__pycache__', '.venv', 'venv', '.next']);
 const MAX_OUTPUT = 10_000;
@@ -12,8 +19,51 @@ export function truncateOutput(s: string, max = MAX_OUTPUT): string {
   return s.slice(0, Math.floor(max * 0.4)) + `\n…[输出已截断，全长 ${s.length} 字符]…\n` + s.slice(-Math.floor(max * 0.55));
 }
 
+/** 子进程环境：移除 harness 自己的 provider 密钥（bash/verify/hooks 共用） */
+export function childEnv(cfg: KeelConfig): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const provider of Object.values(cfg.providers)) delete env[provider.apiKeyEnv];
+  delete env.KEEL_API_KEY;
+  return env;
+}
+
+/** 写入前快照原内容（检查点）：超过上限的文件只记录"未追踪"，rewind 会拒绝恢复它 */
+const SNAPSHOT_LIMIT = 10_000_000;
+function snapshot(ctx: ToolCtx, abs: string): Pick<FileChange, 'before' | 'untracked'> {
+  const target = canonicalPath(abs);
+  if (!fs.existsSync(target)) return { before: null };
+  const stat = fs.statSync(target);
+  if (!stat.isFile() || stat.size > SNAPSHOT_LIMIT) return { before: null, untracked: true };
+  return { before: ctx.store.putBlob(fs.readFileSync(target)) };
+}
+
 export function resolveIn(ctx: ToolCtx, p: string): string {
   return path.resolve(ctx.cwd, p);
+}
+
+/** Check the opened descriptor; O_NONBLOCK also prevents a raced-in FIFO from hanging open. */
+function readFile(abs: string): string {
+  const fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new Error('只支持普通文件');
+    if (stat.size > 2_000_000) throw new Error(`文件过大 (${stat.size} 字节)，请用 bash 处理`);
+    return fs.readFileSync(fd, 'utf8');
+  } finally { fs.closeSync(fd); }
+}
+
+/** A failed/partial write must not truncate the user's existing file. */
+function writeFile(abs: string, content: string): void {
+  const target = canonicalPath(abs);
+  const exists = fs.existsSync(target);
+  if (exists && !fs.statSync(target).isFile()) throw new Error('只支持普通文件');
+  const temporary = `${target}.keel-${randomUUID()}.tmp`;
+  const fd = fs.openSync(temporary, 'wx', exists ? fs.statSync(target).mode & 0o777 : 0o666);
+  try {
+    try { fs.writeFileSync(fd, content, 'utf8'); fs.fsyncSync(fd); }
+    finally { fs.closeSync(fd); }
+    fs.renameSync(temporary, target);
+  } finally { fs.rmSync(temporary, { force: true }); }
 }
 
 function relIn(ctx: ToolCtx, abs: string): string {
@@ -25,23 +75,27 @@ function err(msg: string): ToolOutput {
   return { ok: false, output: msg };
 }
 
-async function walk(root: string, cb: (abs: string) => void, depth = 0): Promise<void> {
-  if (depth > 12) return;
+/** Returning false from the visitor stops the whole walk once the result limit is reached. */
+async function walk(root: string, cb: (abs: string) => boolean | void | Promise<boolean | void>, depth = 0, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
+  if (depth > 12) return true;
   let entries: fs.Dirent[];
   try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
+    entries = await fs.promises.readdir(root, { withFileTypes: true });
   } catch {
-    return;
+    return true;
   }
   for (const d of entries) {
+    signal?.throwIfAborted();
     const abs = path.join(root, d.name);
     if (d.isDirectory()) {
       if (SKIP_DIRS.has(d.name) || d.isSymbolicLink()) continue;
-      await walk(abs, cb, depth + 1);
+      if (!await walk(abs, cb, depth + 1, signal)) return false;
     } else if (d.isFile()) {
-      cb(abs);
+      if (await cb(abs) === false) return false;
     }
   }
+  return true;
 }
 
 export const readTool: ToolDef = {
@@ -68,8 +122,7 @@ export const readTool: ToolDef = {
       const items = fs.readdirSync(abs).slice(0, 200);
       return { ok: true, output: `目录 ${relIn(ctx, abs)} 包含:\n${items.join('\n')}` };
     }
-    if (stat.size > 2_000_000) return err(`文件过大 (${stat.size} 字节)，请用 bash 处理`);
-    const raw = fs.readFileSync(abs, 'utf8');
+    const raw = readFile(abs);
     const lines = raw.split('\n');
     const offset = Math.max(1, Number(input.offset) || 1);
     const limit = Math.min(2000, Math.max(1, Number(input.limit) || 2000));
@@ -96,9 +149,14 @@ export const writeTool: ToolDef = {
     const content = String(input.content ?? '');
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     const existed = fs.existsSync(abs);
-    fs.writeFileSync(abs, content, 'utf8');
+    const before = snapshot(ctx, abs);
+    writeFile(abs, content);
     const n = content ? content.split('\n').length : 0;
-    return { ok: true, output: `${existed ? '覆盖' : '创建'}了 ${relIn(ctx, abs)}（${n} 行，${Buffer.byteLength(content)} 字节）` };
+    return {
+      ok: true,
+      output: `${existed ? '覆盖' : '创建'}了 ${relIn(ctx, abs)}（${n} 行，${Buffer.byteLength(content)} 字节）`,
+      changes: [{ path: relIn(ctx, abs), ...before, after: ctx.store.putBlob(Buffer.from(content, 'utf8')) }],
+    };
   },
 };
 
@@ -119,9 +177,9 @@ export const editTool: ToolDef = {
     const abs = resolveIn(ctx, String(input.path));
     let raw: string;
     try {
-      raw = fs.readFileSync(abs, 'utf8');
-    } catch {
-      return err(`文件不存在: ${relIn(ctx, abs)}（edit 不创建新文件，请用 write）`);
+      raw = readFile(abs);
+    } catch (e) {
+      return err(`无法编辑 ${relIn(ctx, abs)}: ${(e as Error).message}`);
     }
     const oldText = String(input.oldText ?? '');
     const newText = String(input.newText ?? '');
@@ -131,16 +189,21 @@ export const editTool: ToolDef = {
     if (count > 1 && !input.replaceAll) {
       return err(`oldText 匹配了 ${count} 处，需先扩大上下文使其唯一，或设置 replaceAll=true`);
     }
-    const replaced = input.replaceAll ? raw.replaceAll(oldText, newText) : raw.replace(oldText, newText);
-    fs.writeFileSync(abs, replaced, 'utf8');
+    const replaced = input.replaceAll ? raw.replaceAll(oldText, () => newText) : raw.replace(oldText, () => newText);
+    const before = snapshot(ctx, abs);
+    writeFile(abs, replaced);
     const n = input.replaceAll ? count : 1;
-    return { ok: true, output: `编辑了 ${relIn(ctx, abs)}（${n} 处替换，${raw.split('\n').length} → ${replaced.split('\n').length} 行）` };
+    return {
+      ok: true,
+      output: `编辑了 ${relIn(ctx, abs)}（${n} 处替换，${raw.split('\n').length} → ${replaced.split('\n').length} 行）`,
+      changes: [{ path: relIn(ctx, abs), ...before, after: ctx.store.putBlob(Buffer.from(replaced, 'utf8')) }],
+    };
   },
 };
 
 export const bashTool: ToolDef = {
   name: 'bash',
-  description: '在当前目录执行 bash 命令（stdout/stderr 合并返回）。受 bashDeny/bashApprove 策略约束。',
+  description: '在当前目录执行前台 bash 命令（stdout/stderr 合并返回）。命令结束后清理同组后台进程，不保留常驻服务。受 bashDeny/bashApprove 策略约束；开启沙箱时只能写工作目录与临时目录，且可能无外网。',
   parameters: {
     type: 'object',
     properties: {
@@ -150,11 +213,22 @@ export const bashTool: ToolDef = {
     required: ['command'],
   },
   run: async (input, ctx): Promise<ToolOutput> => {
+    if (ctx.signal?.aborted) return { ok: false, output: '操作已中断', exitCode: -1 };
     const command = String(input.command ?? '');
     const timeoutMs = Math.min(600_000, Math.max(1000, Number(input.timeoutMs) || 120_000));
     return new Promise((resolve) => {
       // detached 建独立进程组：超时/中断时整组杀死，避免孙进程泄漏
-      const child = spawn('/bin/bash', ['-c', command], { cwd: ctx.cwd, env: process.env, detached: true });
+      const env = childEnv(ctx.cfg);
+      let file = '/bin/bash';
+      let args = ['-c', command];
+      if (ctx.cfg.sandbox.mode !== 'off') {
+        const kind = detectSandbox();
+        // 要求沙箱但本机没有：拒绝执行，而不是悄悄裸跑
+        if (!kind) return resolve({ ok: false, output: `sandbox.mode=${ctx.cfg.sandbox.mode}，但本机没有可用的 OS 沙箱（macOS sandbox-exec / Linux bwrap），已拒绝执行`, exitCode: -1 });
+        try { [file, args] = sandboxedCommand(kind, ctx.cfg, ctx.cwd, command); }
+        catch (e) { return resolve({ ok: false, output: (e as Error).message, exitCode: -1 }); }
+      }
+      const child = spawn(file, args, { cwd: ctx.cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       let out = '';
       let capped = false;
       const stdoutDecoder = new StringDecoder('utf8');
@@ -187,8 +261,11 @@ export const bashTool: ToolDef = {
         }
       };
       const timer = setTimeout(killTree, timeoutMs);
+      // Foreground-only: reap descendants even if they redirected or retained the shell's pipes.
+      child.once('exit', killTree);
       const onAbort = () => killTree();
       ctx.signal?.addEventListener('abort', onAbort, { once: true });
+      if (ctx.signal?.aborted) onAbort();
       const cleanup = () => {
         clearTimeout(timer);
         ctx.signal?.removeEventListener('abort', onAbort);
@@ -229,10 +306,11 @@ export const globTool: ToolDef = {
     const root = resolveIn(ctx, String(input.path ?? '.'));
     const hits: string[] = [];
     await walk(root, (abs) => {
-      if (hits.length >= 500) return;
+      if (checkPolicy(ctx.cfg.policy, { tool: 'read', input: { path: abs }, cwd: ctx.cwd }).decision !== 'allow') return;
       const rel = relIn(ctx, abs);
       if (re.test(rel)) hits.push(rel);
-    });
+      return hits.length < 500;
+    }, 0, ctx.signal);
     return {
       ok: true,
       output: hits.length ? hits.join('\n') + (hits.length >= 500 ? '\n…[已截断到 500 条]' : '') : '无匹配文件',
@@ -242,7 +320,7 @@ export const globTool: ToolDef = {
 
 export const grepTool: ToolDef = {
   name: 'grep',
-  description: '在目录内递归按正则搜索文本，返回 file:line: content。默认忽略 .git/node_modules 等。',
+  description: '在目录内递归按正则搜索文本，返回 file:line: content。搜索限时 5 秒，可缩小 path/glob 范围。默认忽略 .git/node_modules 等。',
   parameters: {
     type: 'object',
     properties: {
@@ -254,42 +332,59 @@ export const grepTool: ToolDef = {
     required: ['pattern'],
   },
   run: async (input, ctx): Promise<ToolOutput> => {
-    let re: RegExp;
-    try {
-      re = new RegExp(String(input.pattern), input.ignoreCase === false ? '' : 'i');
-    } catch (e) {
-      return err(`正则无效: ${(e as Error).message}`);
-    }
     const fileRe = input.glob ? (await import('../util/glob.js')).globToRegExp(String(input.glob)) : null;
     const root = resolveIn(ctx, String(input.path ?? '.'));
     const hits: string[] = [];
-    await walk(root, (abs) => {
-      if (hits.length >= 200) return;
-      if (fileRe && !fileRe.test(path.basename(abs))) return;
-      let stat: fs.Stats;
-      try {
-        stat = fs.statSync(abs);
-      } catch {
-        return;
-      }
-      if (stat.size > 2_000_000) return;
-      let text: string;
-      try {
-        text = fs.readFileSync(abs, 'utf8');
-      } catch {
-        return;
-      }
-      if (text.slice(0, 8000).includes('\0')) return; // 二进制文件
-      const lines = text.split('\n');
-      for (let i = 0; i < lines.length && hits.length < 200; i++) {
-        if (re.test(lines[i]!)) {
-          hits.push(`${relIn(ctx, abs)}:${i + 1}: ${lines[i]!.slice(0, 240)}`);
+    // One short-lived worker per search keeps backtracking off the agent's event loop.
+    // The script is constant; model input is transferred as data, never evaluated as code.
+    const worker = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+      const re = new RegExp(workerData.pattern, workerData.ignoreCase === false ? '' : 'i');
+      parentPort.postMessage('ready');
+      parentPort.on('message', ({ text, limit }) => {
+        const hits = [];
+        const lines = text.split('\\n');
+        for (let i = 0; i < lines.length && hits.length < limit; i++) {
+          if (re.test(lines[i])) hits.push([i + 1, lines[i].slice(0, 240)]);
         }
-      }
-    });
-    return {
-      ok: true,
-      output: hits.length ? hits.join('\n') + (hits.length >= 200 ? '\n…[已截断到 200 条]' : '') : '无匹配',
-    };
+        parentPort.postMessage(hits);
+      });
+    `, { eval: true, execArgv: [], workerData: { pattern: input.pattern, ignoreCase: input.ignoreCase } });
+    const controller = new AbortController();
+    const onAbort = () => controller.abort(new Error('搜索已中断'));
+    ctx.signal?.addEventListener('abort', onAbort, { once: true });
+    if (ctx.signal?.aborted) onAbort();
+    const timer = setTimeout(() => controller.abort(new Error('搜索超时（5 秒），请缩小范围或简化正则')), 5000);
+    worker.on('error', (error) => controller.abort(error));
+    try {
+      await once(worker, 'message', { signal: controller.signal });
+      await walk(root, async (abs) => {
+        if (checkPolicy(ctx.cfg.policy, { tool: 'read', input: { path: abs }, cwd: ctx.cwd }).decision !== 'allow') return;
+        if (fileRe && !fileRe.test(path.basename(abs))) return;
+        let text: string;
+        try {
+          text = readFile(abs);
+        } catch {
+          return;
+        }
+        if (text.slice(0, 8000).includes('\0')) return; // 二进制文件
+        const result = once(worker, 'message', { signal: controller.signal });
+        worker.postMessage({ text, limit: 200 - hits.length });
+        const [matches] = await result as [Array<[number, string]>];
+        for (const [line, content] of matches) hits.push(`${relIn(ctx, abs)}:${line}: ${content}`);
+        return hits.length < 200;
+      }, 0, controller.signal);
+      controller.signal.throwIfAborted();
+      return {
+        ok: true,
+        output: hits.length ? hits.join('\n') + (hits.length >= 200 ? '\n…[已截断到 200 条]' : '') : '无匹配',
+      };
+    } catch (e) {
+      return err(`搜索失败: ${((controller.signal.reason ?? e) as Error).message}`);
+    } finally {
+      clearTimeout(timer);
+      ctx.signal?.removeEventListener('abort', onAbort);
+      await worker.terminate();
+    }
   },
 };

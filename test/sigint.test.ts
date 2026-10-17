@@ -14,7 +14,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * LLM 服务端挂起不响应 → 子进程停在 in-flight fetch 上 → SIGINT →
  * 预期优雅收尾：exit 130 + 事件流落 turn.completed(aborted)。
  */
-test('SIGINT 集成: keel run 收到真实 SIGINT 后 exit 130 且 aborted 事件落盘', async () => {
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+test(`${signal} 集成: keel run 收到真实信号后 exit 130 且 aborted 事件落盘`, async () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const entry = path.join(root, 'dist', 'index.js');
   assert.ok(fs.existsSync(entry), '需先 npm run build 生成 dist/index.js');
@@ -62,7 +63,7 @@ test('SIGINT 集成: keel run 收到真实 SIGINT 后 exit 130 且 aborted 事�
         clearTimeout(killer);
         resolve(code);
       });
-      child.kill('SIGINT');
+      child.kill(signal);
     });
 
     assert.equal(exitCode, 130, `退出码应为 130。子进程输出:\n${output}`);
@@ -84,3 +85,4 @@ test('SIGINT 集成: keel run 收到真实 SIGINT 后 exit 130 且 aborted 事�
     await server.close();
   }
 }, { timeout: 40_000 });
+}

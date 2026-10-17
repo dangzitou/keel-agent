@@ -15,7 +15,7 @@ export interface Ui {
   policyDenied(tool: string, rule: string | null): void;
   spinStart(label: string): void;
   spinStop(): void;
-  approve(prompt: string): Promise<boolean>;
+  approve(prompt: string, signal?: AbortSignal): Promise<boolean>;
   status(text: string): void;
 }
 
@@ -49,6 +49,7 @@ export class TerminalUi implements Ui {
 
   constructor(
     private readonly writeDelta: (text: string) => void = (text) => process.stdout.write(text),
+    private promptApproval?: Ui['approve'],
   ) {}
 
   private closeStreamLine(): void {
@@ -142,12 +143,18 @@ export class TerminalUi implements Ui {
     }
   }
 
-  async approve(prompt: string): Promise<boolean> {
+  async approve(prompt: string, signal?: AbortSignal): Promise<boolean> {
     this.spinStop();
+    if (signal?.aborted) return false;
+    if (this.promptApproval) return this.promptApproval(prompt, signal);
     const rl = rlPromises.createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await rl.question(`${ansi.yellow('?')} ${prompt} ${ansi.dim('[y/N] ')}`);
-    rl.close();
-    return /^y(es)?$/i.test(answer.trim());
+    try {
+      const answer = await rl.question(`${ansi.yellow('?')} ${prompt} ${ansi.dim('[y/N] ')}`, { signal });
+      return /^y(es)?$/i.test(answer.trim());
+    } catch (e) {
+      if (signal?.aborted) return false;
+      throw e;
+    } finally { rl.close(); }
   }
 
   status(text: string): void {
@@ -199,8 +206,8 @@ export class QuietUi implements Ui {
 }
 
 /** 会话状态行 */
-export function statusLine(sessionId: string, stopReason: string, spendUsd: number, model: string): string {
-  const priceNote = hasKnownPrice(model) ? '' : '（模型无价目，费用未计入）';
+export function statusLine(sessionId: string, stopReason: string, spendUsd: number, model: string, pricing?: Parameters<typeof hasKnownPrice>[1]): string {
+  const priceNote = hasKnownPrice(model, pricing) ? '' : '（模型无价目，费用未计入）';
   return `会话 ${sessionId.slice(-10)} · ${stopReason} · 累计 $${spendUsd.toFixed(4)} · ${bareModel(model)}${priceNote}`;
 }
 
@@ -221,12 +228,18 @@ export function renderEventLine(e: Event): string {
       if (d.content) parts.push(d.content);
       for (const tc of d.toolCalls ?? []) parts.push(`⚙ ${tc.name}(${(tc.arguments ?? '').slice(0, 160)})`);
       const head = ansi.bold('【Keel】');
-      const meta = ansi.dim(`　↑${d.usage?.inputTokens ?? 0} ↓${d.usage?.outputTokens ?? 0} tok · $${(d.costUsd ?? 0).toFixed(4)} · ${d.latencyMs ?? 0}ms`);
+      const meta = ansi.dim(`　↑${d.usage?.inputTokens ?? 0} ↓${d.usage?.outputTokens ?? 0} tok${d.usageEstimated ? '（估算）' : ''} · ${d.costKnown === false ? '价目未知' : `$${(d.costUsd ?? 0).toFixed(4)}`} · ${d.latencyMs ?? 0}ms`);
       return `${head} ${parts.join('\n  ') || '(无输出)'}${meta}`;
     }
-    case 'policy.decision':
-      if (d.decision === 'allow') return ansi.dim(`  策略: allow ${d.tool}`);
-      return ansi[d.decision === 'deny' ? 'red' : 'yellow'](`  策略: ${d.decision} ${d.tool}${d.rule ? `（${d.rule}）` : ''}`);
+    case 'policy.decision': {
+      const hooks = (d.hooks ?? []).length ? ` · hooks: ${(d.hooks as { decision: string }[]).map((h) => h.decision).join('/')}` : '';
+      if (d.decision === 'allow') return ansi.dim(`  策略: allow ${d.tool}${hooks}`);
+      return ansi[d.decision === 'deny' ? 'red' : 'yellow'](`  策略: ${d.decision} ${d.tool}${d.rule ? `（${d.rule}）` : ''}${hooks}`);
+    }
+    case 'file.changed':
+      return ansi.dim(`  ✎ 检查点: ${(d.changes ?? []).map((c: { path: string; before: string | null }) => `${c.before ? '' : '+'}${c.path}`).join(', ')}`);
+    case 'workspace.rewound':
+      return ansi.yellow(`↶ rewind 到事件 ${d.toSeq}：恢复 ${(d.restored ?? []).map((c: { path: string }) => c.path).join(', ')}`);
     case 'tool.call':
       return ''; // 已在 llm.response 的工具调用里展示，回放时跳过
     case 'tool.result': {
@@ -243,12 +256,14 @@ export function renderEventLine(e: Event): string {
       return ansi.dim(`⧗ 验证: ${(d.commands ?? []).join(' && ')}`);
     case 'verify.result':
       return d.ok ? ansi.green(`✓ 验证通过`) : ansi.red(`✗ 验证失败`);
+    case 'verify.invalidated':
+      return ansi.yellow(`! 需重新验证: ${d.reason}`);
     case 'context.compacted':
       return ansi.dim(`▢ 上下文压缩至事件 ${d.upToSeq}`);
     case 'turn.completed':
       return ansi.dim(`—— 回合结束 · ${d.stopReason} · 累计 $${(d.spendUsd ?? 0).toFixed(4)}`);
     case 'budget.exceeded':
-      return ansi.red(`预算熔断：$${d.spentUsd} / 上限 $${d.capUsd}`);
+      return ansi.red(`预算熔断：$${d.spentUsd} / ${d.capUsd} · tokens ${d.spentTokens ?? '?'} / ${d.capTokens ?? '?'}`);
     case 'error':
       return ansi.red(`错误[${d.where}]: ${d.message}`);
     default:

@@ -13,15 +13,10 @@ export function isRetryable(e: unknown): boolean {
 
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(t);
-        reject(new Error('aborted'));
-      },
-      { once: true },
-    );
+    const onAbort = () => { clearTimeout(t); signal?.removeEventListener('abort', onAbort); reject(new Error('aborted')); };
+    const t = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 
@@ -39,6 +34,7 @@ export async function withRetry<T>(
 ): Promise<{ result: T; attempts: number }> {
   let attempt = 0;
   for (;;) {
+    if (opts.signal?.aborted) throw new Error('aborted');
     attempt += 1;
     try {
       const result = await fn(attempt);

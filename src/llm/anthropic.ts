@@ -1,5 +1,5 @@
 import { ChatParams, ChatResult, LlmProvider, ToolCall } from './types.js';
-import { estimateUsage, postJson, sseDataChunks } from './http.js';
+import { estimateUsage, postJson, responseJson, sseDataChunks } from './http.js';
 
 /** 内部消息（OpenAI 风格）→ Anthropic Messages 请求体 */
 export function toAnthropicBody(params: ChatParams, stream: boolean): Record<string, unknown> {
@@ -60,7 +60,7 @@ function mergeContent(a: unknown, b: unknown): unknown {
 }
 
 function asBlocks(c: unknown): unknown[] {
-  if (typeof c === 'string') return c ? [c] : [];
+  if (typeof c === 'string') return c ? [{ type: 'text', text: c }] : [];
   return Array.isArray(c) ? c : [];
 }
 
@@ -74,7 +74,8 @@ function safeJson(s: string): Record<string, unknown> {
 }
 
 /** Anthropic 响应 JSON → 内部消息 */
-export function fromAnthropicResponse(json: { content?: { type: string; text?: string; id?: string; name?: string; input?: unknown }[]; usage?: { input_tokens?: number; output_tokens?: number } }): { message: ChatResult['message']; usage: ChatResult['usage'] } {
+export function fromAnthropicResponse(json: { type?: string; stop_reason?: string; content?: { type: string; text?: string; id?: string; name?: string; input?: unknown }[]; usage?: { input_tokens?: number; output_tokens?: number } }): ChatResult {
+  if (json.type === 'error' || json.stop_reason === 'max_tokens' || !Array.isArray(json.content) || !json.content.length) throw new Error('Anthropic 响应失败、被截断或缺少 content');
   const text: string[] = [];
   const tool_calls: ToolCall[] = [];
   for (const b of json.content ?? []) {
@@ -95,10 +96,11 @@ export function fromAnthropicResponse(json: { content?: { type: string; text?: s
  */
 export class AnthropicStreamAccumulator {
   content = '';
+  completed = false;
   usage: { inputTokens: number; outputTokens: number } | undefined;
   private blocks = new Map<number, { id: string; name: string; arguments: string }>();
 
-  push(evt: { type: string; index?: number; content_block?: { type?: string; id?: string; name?: string }; delta?: { type?: string; text?: string; partial_json?: string }; usage?: { output_tokens?: number }; message?: { usage?: { input_tokens?: number; output_tokens?: number } } }): void {
+  push(evt: { type: string; index?: number; content_block?: { type?: string; id?: string; name?: string }; delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string }; usage?: { output_tokens?: number }; message?: { usage?: { input_tokens?: number; output_tokens?: number } } }): void {
     switch (evt.type) {
       case 'message_start':
         if (evt.message?.usage) {
@@ -121,9 +123,15 @@ export class AnthropicStreamAccumulator {
         break;
       }
       case 'message_delta':
+        if (evt.delta?.stop_reason === 'max_tokens') throw new Error('Anthropic 输出被 max_tokens 截断');
         if (evt.usage && this.usage) this.usage.outputTokens = evt.usage.output_tokens ?? this.usage.outputTokens;
         else if (evt.usage) this.usage = { inputTokens: 0, outputTokens: evt.usage.output_tokens ?? 0 };
         break;
+      case 'message_stop':
+        this.completed = true;
+        break;
+      case 'error':
+        throw new Error('Anthropic 流式请求失败');
     }
   }
 
@@ -151,12 +159,8 @@ export class AnthropicProvider implements LlmProvider {
       let emitted = false;
       try {
         for await (const payload of sseDataChunks(res)) {
-          let evt: Parameters<AnthropicStreamAccumulator['push']>[0];
-          try {
-            evt = JSON.parse(payload);
-          } catch {
-            continue;
-          }
+          if (payload === '[DONE]') continue;
+          const evt = JSON.parse(payload) as Parameters<AnthropicStreamAccumulator['push']>[0];
           const before = acc.content;
           acc.push(evt);
           if (acc.content !== before) {
@@ -164,6 +168,7 @@ export class AnthropicProvider implements LlmProvider {
             params.onDelta?.(acc.content.slice(before.length));
           }
         }
+        if (!acc.completed) throw new Error('Anthropic 流被截断：缺少 message_stop');
       } catch (e) {
         if (emitted) (e as { noRetry?: boolean }).noRetry = true;
         throw e;
@@ -173,6 +178,8 @@ export class AnthropicProvider implements LlmProvider {
       return { message, usage: estimateUsage(params.messages, message), usageEstimated: true };
     }
     const res = await postJson(url, { headers, body: toAnthropicBody(params, false), signal: params.signal, timeoutMs: params.timeoutMs });
-    return fromAnthropicResponse((await res.json()) as Parameters<typeof fromAnthropicResponse>[0]);
+    const json = await responseJson(res) as Parameters<typeof fromAnthropicResponse>[0];
+    const result = fromAnthropicResponse(json);
+    return json.usage ? result : { ...result, usage: estimateUsage(params.messages, result.message), usageEstimated: true };
   }
 }
